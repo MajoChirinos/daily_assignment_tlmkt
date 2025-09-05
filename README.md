@@ -124,12 +124,6 @@ print(result)  # "Assignment Completed"
 python main.py
 ```
 
-### Deployment en Cloud Run
-```python
-def daily_assignment_trigger(event, context):
-    return run_daily_assignment()
-```
-
 ## Flujo del Proceso
 
 ### 1. **Configuración y Credenciales**
@@ -201,7 +195,7 @@ def daily_assignment_trigger(event, context):
 | Operador | Campaña | Moneda | Usuarios Asignados |
 |----------|---------|--------|--------------------|
 | Ana García | No Depositantes | USD | 42 |
-| Luis Pérez | Reactivación | EUR | 38 |
+| Luis Pérez | Reactivación | CLP | 38 |
 | María López | Segundo Depósito | BRL | 35 |
 
 ### Resumen de Asignación Final
