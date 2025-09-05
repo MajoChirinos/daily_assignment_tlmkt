@@ -13,9 +13,8 @@ Sistema automatizado de asignación diaria de usuarios para operadores de telema
 ```
 CloudRun_daily_assignment_tlmkt/
 ├── data/
-│   ├── Telemarketing_Assignment_20250716.xlsx    # Archivo de asignación del 16/07/2025
+│   ├── Telemarketing_Assignment_20250716.xlsx    # Ejemplos de archivos de asignación diaria
 │   ├── Telemarketing_Assignment_20250826.xlsx    # Archivo de asignación del 26/08/2025
-│   └── Telemarketing_Assignment_20250827.xlsx    # Archivo de asignación del 27/08/2025
 ├── src/
 │   ├── config.py                   # Clase de configuración dinámica
 │   ├── extract.py                  # Extracción de BigQuery y Google Sheets
@@ -25,9 +24,7 @@ CloudRun_daily_assignment_tlmkt/
 ├── .env                           # Variables de entorno (no incluir en repo)
 ├── .gitignore                     # Archivos excluidos del control de versiones
 ├── main.py                        # Script principal ejecutable
-├── daily_assignment_v2.ipynb     # Notebook de desarrollo y análisis
 ├── requirements.txt               # Dependencias del proyecto
-├── parabolic-water-352818-e036b2475893.json  # Credenciales de servicio (no incluir en repo)
 └── README.md                      # Documentación del proyecto
 ```
 
