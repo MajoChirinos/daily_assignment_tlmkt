@@ -1,0 +1,30 @@
+# Core data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Google Cloud services
+google-cloud-bigquery>=3.20.0
+google-auth>=2.20.0
+google-api-core>=2.15.0
+google-cloud-core>=2.4.0
+
+# Google Sheets integration
+gspread>=6.0.0
+oauth2client>=4.1.0
+
+# BigQuery integration
+pandas-gbq>=0.19.0
+
+# Excel file operations
+openpyxl>=3.1.0
+
+# Environment configuration
+python-dotenv>=1.0.0
+
+# Note: The following standard library modules are used but don't need installation:
+# - datetime (from datetime import datetime, timedelta)
+# - typing (from typing import List, Dict)
+# - collections (from collections import defaultdict)
+# - re (import re)
+# - os (import os)
+# - sys (import sys)
