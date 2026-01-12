@@ -3,22 +3,22 @@ import numpy as np
 import pandas_gbq
 from oauth2client.service_account import ServiceAccountCredentials
 import gspread
-from dotenv import load_dotenv
 import os
 from typing import List
+import json
 
 def read_google_sheet(sheet, work_sheet):
     
-    load_dotenv()
-    json_keyfile_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+
+    json_keyfile_path = os.getenv('SHEET_CREDENTIALS')
     
     if json_keyfile_path is None:
-        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS environment variable not set. Please check your .env file.")
+        raise ValueError("SHEET_CREDENTIALS environment variable not set. Please configure it in Cloud Run.")
     
     # Define the scope
     scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
     # Add credentials to the account
-    creds = ServiceAccountCredentials.from_json_keyfile_name(json_keyfile_path, scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_keyfile_path), scope)
 
     # Authorize the clientsheet
     client = gspread.authorize(creds)
@@ -50,21 +50,41 @@ def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], cr
     all_data = []  # List to store DataFrames from each table
 
     for table_name in campaigns_to_assign:
-        # Define the query for each table
-        query = f"SELECT * FROM `mi-casino.dm_telemarketing.{table_name}`;"
-        
-        # Execute the query and fetch the data
-        df = pandas_gbq.read_gbq(query, project_id='mi-casino', use_bqstorage_api=True, credentials=credentials)
-        
-        # Apply filters
-        df = df[~df['register_currency'].isin(['CAD', 'ARS', 'BRL'])]
-        df = df[df.level.isin([1, 2, 3])]
-        df.dropna(subset=['phone'], inplace=True)
-        
-        # Add the filtered DataFrame to the list
-        all_data.append(df)
+        try:
+            # Define the query for each table
+            query = f"SELECT * FROM `mi-casino.dm_telemarketing.{table_name}`;"
+            
+            # Execute the query and fetch the data
+            print(f"* {table_name}")
+            df = pandas_gbq.read_gbq(query, project_id='mi-casino', use_bqstorage_api=True, credentials=credentials)
+            
+            # Check if the table is empty
+            if df.empty:
+                print(f"⚠️  Table {table_name} is empty, skipping to next campaign")
+                continue
+            
+            # Apply filters
+            df = df[~df['register_currency'].isin(['CAD', 'ARS', 'BRL'])]
+            df = df[df.level.isin([1, 2, 3])]
+            df.dropna(subset=['phone'], inplace=True)
+            
+            # Add the filtered DataFrame to the list
+            all_data.append(df)
+            
+        except Exception as e:
+            # Handle table not found or other errors
+            if "Not found" in str(e) or "404" in str(e):
+                print(f"⚠️  Table {table_name} does not exist, skipping to next campaign")
+            else:
+                print(f"⚠️  Error reading table {table_name}: {str(e)}, skipping to next campaign")
+            continue
 
     # Concatenate all DataFrames into one
+    if not all_data:
+        # If no data was collected, return an empty DataFrame with expected columns
+        print("⚠️  No data available from any campaign table")
+        return pd.DataFrame()
+    
     available_users = pd.concat(all_data, ignore_index=True)
 
     # Filter out users from currencies_to_filter
@@ -73,8 +93,12 @@ def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], cr
     # Create assignment date column
     available_users['assignment_date'] = pd.to_datetime('today').strftime('%Y-%m-%d')
 
+    # Ensure campaign_details exists (for tables without this column, add it as None)
+    if 'campaign_details' not in available_users.columns:
+        available_users['campaign_details'] = None
+
     # Select relevant columns
-    col = ['assignment_date', 'campaign_name', 'user_id', 'username', 'firstLast_name', 'phone', 'level',
+    col = ['assignment_date', 'campaign_name', 'campaign_details', 'user_id', 'username', 'firstLast_name', 'phone', 'level',
            'register_currency', 'last_activity']
     available_users = available_users[col]
 

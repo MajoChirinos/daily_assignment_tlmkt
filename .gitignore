@@ -1,10 +1,10 @@
-# Credenciales y configuración sensible
+# Credentials and sensitive configuration
 *.json
 .env
 .env.local
 .env.production
 
-# Datos - Excluir toda la carpeta data y sus archivos
+# Data - Exclude all data folder and files
 data/
 *.csv
 *.xlsx
@@ -34,7 +34,7 @@ wheels/
 *.egg
 MANIFEST
 
-# Entornos virtuales
+# Virtual environments
 env/
 venv/
 ENV/
@@ -46,21 +46,21 @@ venv.bak/
 .ipynb_checkpoints
 *.ipynb
 
-# IDEs y editores
+# IDEs and editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Logs y depuración
+# Logs and debugging
 *.log
 logs/
 .pytest_cache/
 .coverage
 htmlcov/
 
-# Temporales y cache
+# Temporary and cache
 temp/
 tmp/
 *.tmp
@@ -68,7 +68,7 @@ tmp/
 *.swp
 *.cache
 
-# Sistema operativo
+# Operating system
 .DS_Store
 .DS_Store?
 ._*
@@ -77,10 +77,10 @@ tmp/
 ehthumbs.db
 Thumbs.db
 
-# Archivos de configuración local específicos
+# Local configuration files
 config_local.py
 local_settings.py
 
-# Archivos de backup
+# Backup files
 *.backup
 *~
