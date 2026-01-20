@@ -659,3 +659,42 @@ def complete_assignments(remaining_users_df, remaining_assignments_dict, extra_u
     return assigned_users_df, available_users
 
 
+def create_assignment_metrics(campaign_dfs, assigned_users, assignment_date):
+    """
+    Creates a DataFrame with daily metrics showing available and assigned users per campaign.
+    
+    Args:
+        campaign_dfs (dict): Dictionary with campaign names as keys and DataFrames with available users as values
+        assigned_users (pd.DataFrame): DataFrame with all assigned users containing 'campaign_name' column
+        assignment_date (str): Date of the assignment in 'YYYYMMDD' format
+    
+    Returns:
+        pd.DataFrame: DataFrame with columns:
+            - assignment_date: Date of the assignment
+            - campaign: Campaign name
+            - available_users: Number of users available for assignment
+            - assigned_users: Number of users actually assigned
+    """
+    metrics_list = []
+    
+    # Create metrics for each campaign
+    for campaign, df in campaign_dfs.items():
+        # Count available users for this campaign
+        available_count = len(df)
+        
+        # Count assigned users for this campaign
+        assigned_count = len(assigned_users[assigned_users['campaign_name'] == campaign])
+        
+        metrics_list.append({
+            'assignment_date': assignment_date,
+            'campaign': campaign,
+            'available_users': available_count,
+            'assigned_users': assigned_count
+        })
+    
+    # Create DataFrame
+    metrics_df = pd.DataFrame(metrics_list)
+    
+    return metrics_df
+
+

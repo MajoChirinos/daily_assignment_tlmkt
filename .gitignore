@@ -10,6 +10,7 @@ data/
 *.xlsx
 *.parquet
 *.xls
+*.zip
 
 # Python
 __pycache__/

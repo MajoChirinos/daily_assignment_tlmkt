@@ -102,54 +102,59 @@ def CreateAndLoad_BQ(data_dict: Dict[str, pd.DataFrame], bq: bigquery.Client,
             # Now check if the table exists
             try:
                 bq.get_table(table_id)  # Try to get the table info
-                print(f"Table {table_id} already exists. Checking max date before loading data.")
                 table = bq.get_table(table_id)  # Get table details using the same client
-
-                if not deleted_if_exist:
-                    # Query to get the maximum date from the table
-                    query = f"""
-                        SELECT MAX({date_column}) AS max_date
-                        FROM `{table_id}`
-                    """
-                    query_job = bq.query(query)
-                    result = query_job.result()
-                    max_date = next(result).max_date  # Get the maximum date
-
-                    # Compare with today's date
-                    today = pd.to_datetime(datetime.today().date())
+                
+                # Only check dates and print load messages if we're actually loading data
+                if load_data:
+                    print(f"Table {table_id} already exists. Checking max date before loading data.")
                     
-                    # Strategy 1: Replace today's data if it exists (delete_today=True)
-                    if delete_today:
-                        # First check if there's data for today
-                        check_query = f"""
-                            SELECT COUNT(*) AS count
+                    if not deleted_if_exist:
+                        # Query to get the maximum date from the table
+                        query = f"""
+                            SELECT MAX({date_column}) AS max_date
                             FROM `{table_id}`
-                            WHERE DATE({date_column}) = CURRENT_DATE()
                         """
-                        check_job = bq.query(check_query)
-                        check_result = check_job.result()
-                        today_count = next(check_result).count
+                        query_job = bq.query(query)
+                        result = query_job.result()
+                        max_date = next(result).max_date  # Get the maximum date
+
+                        # Compare with today's date
+                        today = pd.to_datetime(datetime.today().date())
                         
-                        if today_count > 0:
-                            # Delete today's data only if it exists
-                            delete_query = f"""
-                                DELETE FROM `{table_id}`
+                        # Strategy 1: Replace today's data if it exists (delete_today=True)
+                        if delete_today:
+                            # First check if there's data for today
+                            check_query = f"""
+                                SELECT COUNT(*) AS count
+                                FROM `{table_id}`
                                 WHERE DATE({date_column}) = CURRENT_DATE()
                             """
-                            delete_job = bq.query(delete_query)
-                            delete_job.result()  # Wait for deletion to complete
-                            print(f"Deleted {today_count} rows from today's data in table {table_id}.")
+                            check_job = bq.query(check_query)
+                            check_result = check_job.result()
+                            today_count = next(check_result).count
+                            
+                            if today_count > 0:
+                                # Delete today's data only if it exists
+                                delete_query = f"""
+                                    DELETE FROM `{table_id}`
+                                    WHERE DATE({date_column}) = CURRENT_DATE()
+                                """
+                                delete_job = bq.query(delete_query)
+                                delete_job.result()  # Wait for deletion to complete
+                                print(f"Deleted {today_count} rows from today's data in table {table_id}.")
+                            else:
+                                print(f"No data for today in table {table_id}. Proceeding to load new data.")
+                            # Continue to load data after deletion (or if no data existed)
+                        
+                        # Strategy 2: Prevent duplicates - skip if data already exists for today (delete_today=False)
                         else:
-                            print(f"No data for today in table {table_id}. Proceeding to load new data.")
-                        # Continue to load data after deletion (or if no data existed)
-                    
-                    # Strategy 2: Prevent duplicates - skip if data already exists for today (delete_today=False)
-                    else:
-                        if max_date == today:
-                            print(f"Table {table_id} has data for today. No new data will be appended.")
-                            continue  # Skip to the next table if max date is today
-                        else:
-                            print(f"Max date is {max_date}. New data will be appended.")
+                            if max_date == today:
+                                print(f"Table {table_id} has data for today. No new data will be appended.")
+                                continue  # Skip to the next table if max date is today
+                            else:
+                                print(f"Max date is {max_date}. New data will be appended.")
+                else:
+                    print(f"Table {table_id} already exists. Data loading is disabled (load_data=False).")
 
             except NotFound:
                 print(f"\nTable: {table_id} does not exist. Creating new table.")

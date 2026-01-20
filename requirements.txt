@@ -18,6 +18,9 @@ pandas-gbq>=0.19.0
 # Excel file operations
 openpyxl>=3.1.0
 
+# Progress bars
+tqdm>=4.66.0
+
 # Environment configuration
 python-dotenv>=1.0.0
 

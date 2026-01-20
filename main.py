@@ -15,7 +15,8 @@ from src.transform import (
     assign_currencies,
     calculate_remaining_assignments_dict,
     complete_assignments,
-    count_users_per_operator
+    count_users_per_operator,
+    create_assignment_metrics
 )
 from src.load import CreateAndLoad_BQ
 
@@ -233,6 +234,29 @@ def run_daily_assignment(request) -> str:
 
         print(count_users_per_operator(assigned_users))
         
+        # ========== CREATE ASSIGNMENT METRICS ==========
+        # Create metrics DataFrame with available and assigned users per campaign
+        print("Creating assignment metrics...")
+        assignment_metrics = create_assignment_metrics(campaign_dfs, assigned_users, today)
+        
+        # Convert campaign codes to display names for metrics
+        assignment_metrics['campaign'] = assignment_metrics['campaign'].apply(normalize_campaign_to_display)
+        
+        # Convert assignment_date to datetime
+        assignment_metrics['assignment_date'] = pd.to_datetime(assignment_metrics['assignment_date'], format='%Y%m%d')
+        
+        print("Assignment metrics created successfully.")
+        print(assignment_metrics)
+        
+        # Save assignment metrics locally
+        print("Saving assignment metrics to local file...")
+        try:
+            assignment_metrics.to_excel(f'./data/Assignment_Metrics_{today}.xlsx', index=False)
+            print("Assignment metrics saved to local file.")
+        except Exception as error:
+            print(f"Error saving metrics to local file: {error}")
+            # Continue even if local save fails
+        
         # ========== DATA LOADING ==========
         assigned_users = assigned_users.copy()
 
@@ -283,7 +307,8 @@ def run_daily_assignment(request) -> str:
         # Create Assignment data dictionary
         dict_tlmkt_assignment = {
             'DailyAssignment': assigned_users[['assignment_date', 'operator', 'campaign_name', 'campaign_details',
-            'user_id', 'username', 'firstLast_name', 'phone', 'level', 'register_currency', 'last_activity']]
+            'user_id', 'username', 'firstLast_name', 'phone', 'level', 'register_currency', 'last_activity']],
+            'AssignmentMetrics': assignment_metrics[['assignment_date', 'campaign', 'available_users', 'assigned_users']]
         }
 
         # Call to Loading function
@@ -294,7 +319,7 @@ def run_daily_assignment(request) -> str:
                              dataset_id='dm_telemarketing', 
                              prefix='tlmkt_', 
                              deleted_if_exist=False, 
-                             load_data=True, 
+                             load_data=False, 
                              delete_today=False)
         except Exception as error:
             print(f"Error loading data to BigQuery: {error}")
