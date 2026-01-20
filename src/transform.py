@@ -674,6 +674,7 @@ def create_assignment_metrics(campaign_dfs, assigned_users, assignment_date):
             - campaign: Campaign name
             - available_users: Number of users available for assignment
             - assigned_users: Number of users actually assigned
+            - unassigned_users: Number of users that were available but not assigned
     """
     metrics_list = []
     
@@ -685,11 +686,15 @@ def create_assignment_metrics(campaign_dfs, assigned_users, assignment_date):
         # Count assigned users for this campaign
         assigned_count = len(assigned_users[assigned_users['campaign_name'] == campaign])
         
+        # Calculate unassigned users (leftover)
+        unassigned_count = available_count - assigned_count
+        
         metrics_list.append({
             'assignment_date': assignment_date,
             'campaign': campaign,
             'available_users': available_count,
-            'assigned_users': assigned_count
+            'assigned_users': assigned_count,
+            'unassigned_users': unassigned_count
         })
     
     # Create DataFrame

@@ -239,8 +239,8 @@ def run_daily_assignment(request) -> str:
         print("Creating assignment metrics...")
         assignment_metrics = create_assignment_metrics(campaign_dfs, assigned_users, today)
         
-        # Convert campaign codes to display names for metrics
-        assignment_metrics['campaign'] = assignment_metrics['campaign'].apply(normalize_campaign_to_display)
+        # Keep internal campaign codes for consistency with the rest of the system
+        # assignment_metrics['campaign'] already has codes like: non_depositors, second_deposit, etc.
         
         # Convert assignment_date to datetime
         assignment_metrics['assignment_date'] = pd.to_datetime(assignment_metrics['assignment_date'], format='%Y%m%d')
@@ -308,7 +308,7 @@ def run_daily_assignment(request) -> str:
         dict_tlmkt_assignment = {
             'DailyAssignment': assigned_users[['assignment_date', 'operator', 'campaign_name', 'campaign_details',
             'user_id', 'username', 'firstLast_name', 'phone', 'level', 'register_currency', 'last_activity']],
-            'AssignmentMetrics': assignment_metrics[['assignment_date', 'campaign', 'available_users', 'assigned_users']]
+            'AssignmentMetrics': assignment_metrics[['assignment_date', 'campaign', 'available_users', 'assigned_users', 'unassigned_users']]
         }
 
         # Call to Loading function
@@ -319,7 +319,7 @@ def run_daily_assignment(request) -> str:
                              dataset_id='dm_telemarketing', 
                              prefix='tlmkt_', 
                              deleted_if_exist=False, 
-                             load_data=False, 
+                             load_data=True, 
                              delete_today=False)
         except Exception as error:
             print(f"Error loading data to BigQuery: {error}")
