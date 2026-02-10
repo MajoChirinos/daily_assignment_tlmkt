@@ -76,18 +76,35 @@ def run_daily_assignment(request) -> str:
         lp['campaign_name'] = lp['campaign_name'].apply(normalize_campaign_to_code)
         lp['campaign_name'] = lp['campaign_name'].str.split(',\s*')
 
-        # Historical assignment users
+        # Historical assignment users from telemarketing
         try:
             daily_assigment_hist = get_data_hist('tlmkt_DailyAssignment', days_ago_to_discard, credentials=creds)
         except Exception as error:
-            print(f"Error getting historical data from BigQuery: {error}")
-            return f"Error: Failed to get historical data - {error}"
+            print(f"Error getting historical telemarketing data from BigQuery: {error}")
+            return f"Error: Failed to get historical telemarketing data - {error}"
         
+        print(f"Telemarketing historical users loaded: {daily_assigment_hist.shape[0]}")
         daily_assigment_hist['campaign_name'] = daily_assigment_hist['campaign_name'].apply(normalize_campaign_to_code)
         daily_assigment_hist = daily_assigment_hist[daily_assigment_hist['assignment_date'] < today]
 
-        # Users to discard
-        users_to_discard = daily_assigment_hist[['user_id', 'campaign_name']]
+        # Historical assignment users from email marketing
+        try:
+            email_mkt_hist = get_data_hist('email_mkt_DailyAssignment', days_ago_to_discard, credentials=creds)
+        except Exception as error:
+            print(f"Warning: Could not get email marketing historical data: {error}")
+            # Create empty DataFrame with same structure if table doesn't exist
+            email_mkt_hist = pd.DataFrame(columns=['user_id', 'campaign_name', 'assignment_date'])
+        
+        print(f"Email marketing historical users loaded: {email_mkt_hist.shape[0]}")
+        if not email_mkt_hist.empty:
+            email_mkt_hist['campaign_name'] = email_mkt_hist['campaign_name'].apply(normalize_campaign_to_code)
+            email_mkt_hist = email_mkt_hist[email_mkt_hist['assignment_date'] < today]
+
+        # Users to discard (concatenate both telemarketing and email marketing users)
+        tlmkt_users_to_discard = daily_assigment_hist[['user_id', 'campaign_name']]
+        email_users_to_discard = email_mkt_hist[['user_id', 'campaign_name']]
+        users_to_discard = pd.concat([tlmkt_users_to_discard, email_users_to_discard], ignore_index=True)
+        print(f"Total users to discard: {users_to_discard.shape[0]} (TLMKT: {tlmkt_users_to_discard.shape[0]}, Email MKT: {email_users_to_discard.shape[0]})")
 
         # Segment tables to assign
         try:
@@ -319,8 +336,8 @@ def run_daily_assignment(request) -> str:
                              dataset_id='dm_telemarketing', 
                              prefix='tlmkt_', 
                              deleted_if_exist=False, 
-                             load_data=True, 
-                             delete_today=False)
+                             load_data=False, 
+                             delete_today=True)
         except Exception as error:
             print(f"Error loading data to BigQuery: {error}")
             return f"Error: Failed to load data to BigQuery - {error}"

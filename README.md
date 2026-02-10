@@ -7,7 +7,7 @@ Automated daily user assignment system for telemarketing operators. The system d
 
 - **Campaign distribution**: Each operator can handle 1-3 specific campaigns
 - **Currency balancing**: Intelligent distribution by currency types (priority, small, large, relevant)
-- **Contacted user exclusion**: Avoids contacting recent users based on configuration
+- **Contacted user exclusion**: Avoids contacting users recently contacted via telemarketing or email marketing based on configuration
 - **Proportional assignment algorithm**: Percentage distribution based on number of assigned campaigns
 
 ## Project Structure
@@ -50,7 +50,7 @@ class Config:
 ```
 
 **Main parameters:**
-- `days_ago_to_discard`: Days back to exclude contacted users (e.g., 7)
+- `days_ago_to_discard`: Days back to exclude users contacted by telemarketing or email marketing (e.g., 7)
 - `users_to_assign_per_operator`: Base number of users per operator (e.g., 100)
 - `currencies_to_filter`: List of currencies to exclude in assignment (e.g., ['USD', 'EUR', 'BRL'])
 - `priority_currencies`: High priority currencies for early assignment (e.g., ['USD', 'EUR'])
@@ -177,11 +177,11 @@ gcloud run deploy daily-assignment-tlmkt \
 ### 2. **Data Extraction (Extract)**
 - **Active operators**: List from Google Sheet 'LP_TLMKT'
 - **Available users**: BigQuery segments according to configuration
-- **Assignment history**: Recently contacted users
+- **Assignment history**: Recently contacted users via telemarketing (`tlmkt_DailyAssignment`) and email marketing (`email_mkt_DailyAssignment`)
 - **Campaign configuration**: Dynamic system parameters
 
 ### 3. **Transformation and Assignment (Transform)**
-- **User filtering**: Exclusion of recently contacted users
+- **User filtering**: Exclusion of users recently contacted by telemarketing or email marketing
 - **Campaign normalization**: Conversion between internal codes and Spanish names
 - **DataFrame creation per campaign**: Organization of available users
 - **4-phase assignment algorithm**:

@@ -52,7 +52,7 @@ def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], cr
     for table_name in campaigns_to_assign:
         try:
             # Define the query for each table
-            query = f"SELECT * FROM `mi-casino.dm_telemarketing.{table_name}`;"
+            query = f"SELECT DISTINCT * FROM `mi-casino.dm_telemarketing.{table_name}`;"
             
             # Execute the query and fetch the data
             print(f"* {table_name}")

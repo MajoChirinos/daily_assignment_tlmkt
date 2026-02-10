@@ -7,7 +7,7 @@ Sistema automatizado de asignación diaria de usuarios para operadores de telema
 
 - **Distribución por campañas**: Cada operador puede manejar 1-3 campañas específicas
 - **Balanceo por monedas**: Distribución inteligente según tipos de moneda (prioritarias, pequeñas, grandes, relevantes)
-- **Exclusión de usuarios contactados**: Evita contactar usuarios recientes según configuración
+- **Exclusión de usuarios contactados**: Evita contactar usuarios recientemente contactados por telemarketing o email marketing según configuración
 - **Algoritmo de asignación proporcional**: Distribución porcentual según número de campañas asignadas
 
 ## Estructura del Proyecto
@@ -51,7 +51,7 @@ class Config:
 ```
 
 **Parámetros principales:**
-- `days_ago_to_discard`: Días hacia atrás para excluir usuarios contactados (ej: 7)
+- `days_ago_to_discard`: Días hacia atrás para excluir usuarios contactados por telemarketing o email marketing (ej: 7)
 - `users_to_assign_per_operator`: Cantidad base de usuarios por operador (ej: 100)
 - `currencies_to_filter`: Lista de monedas a excluir en la asignación (ej: ['USD', 'EUR', 'BRL'])
 - `priority_currencies`: Monedas de alta prioridad para asignación temprana (ej: ['USD', 'EUR'])
@@ -178,11 +178,11 @@ gcloud run deploy daily-assignment-tlmkt \
 ### 2. **Extracción de Datos (Extract)**
 - **Operadores activos**: Lista desde Google Sheet 'LP_TLMKT'
 - **Usuarios disponibles**: Segmentos de BigQuery según configuración
-- **Historial de asignaciones**: Usuarios contactados recientemente
+- **Historial de asignaciones**: Usuarios contactados recientemente por telemarketing (`tlmkt_DailyAssignment`) y email marketing (`email_mkt_DailyAssignment`)
 - **Configuración de campañas**: Parámetros dinámicos del sistema
 
 ### 3. **Transformación y Asignación (Transform)**
-- **Filtrado de usuarios**: Exclusión de usuarios contactados recientemente
+- **Filtrado de usuarios**: Exclusión de usuarios contactados recientemente por telemarketing o email marketing
 - **Normalización de campañas**: Conversión entre códigos internos y nombres en español
 - **Creación de DataFrames por campaña**: Organización de usuarios disponibles
 - **Algoritmo de asignación en 4 fases**:
