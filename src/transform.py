@@ -53,6 +53,90 @@ def normalize_campaign_to_display(campaign_str):
     return code_to_display.get(campaign_str, campaign_str)
 
 
+def create_priority_sort_key(priority_value):
+    """
+    Creates a sortable tuple from priority string for proper ordering.
+    
+    Priority format: LEVEL-NUMBER (e.g., ULTRA-1, ALTA-2, MEDIA-3, BAJA-1)
+    - ULTRA has highest priority (1)
+    - ALTA has second priority (2)
+    - MEDIA has third priority (3)
+    - BAJA has lowest priority (4)
+    - Within each level, lower numbers have higher priority (1 > 2 > 3)
+    
+    Args:
+        priority_value (str): Priority string in format "LEVEL-NUMBER"
+        
+    Returns:
+        tuple: (level_rank, number) for sorting. Returns None for invalid/null values.
+    """
+    if pd.isna(priority_value) or not priority_value:
+        return None  # Nulls will maintain their random position
+    
+    # Priority level mapping
+    priority_levels = {
+        'ULTRA': 1,
+        'ALTA': 2,
+        'MEDIA': 3,
+        'BAJA': 4
+    }
+    
+    try:
+        # Split by hyphen: "ULTRA-1" -> ["ULTRA", "1"]
+        parts = str(priority_value).split('-')
+        if len(parts) == 2:
+            level = parts[0].strip().upper()
+            number = int(parts[1].strip())
+            level_rank = priority_levels.get(level, None)
+            if level_rank is not None:
+                return (level_rank, number)
+        return None  # Invalid format
+    except (ValueError, AttributeError):
+        return None  # Error parsing
+
+
+def sort_by_priority(df):
+    """
+    Sorts a DataFrame by priority column, maintaining random order within same priority.
+    Rows with null/invalid priority values maintain their original random position.
+    
+    Args:
+        df (pd.DataFrame): DataFrame with 'priority' column
+        
+    Returns:
+        pd.DataFrame: Sorted DataFrame (rows with priority first, then rows without)
+    """
+    if df.empty or 'priority' not in df.columns:
+        return df
+    
+    # Separate rows with valid priority from those without
+    df_copy = df.copy()
+    df_copy['_has_priority'] = df_copy['priority'].apply(
+        lambda x: create_priority_sort_key(x) is not None
+    )
+    
+    # Split DataFrames
+    df_with_priority = df_copy[df_copy['_has_priority']].copy()
+    df_without_priority = df_copy[~df_copy['_has_priority']].copy()
+    
+    # Sort only the ones with valid priority
+    if not df_with_priority.empty:
+        df_with_priority['_priority_sort_key'] = df_with_priority['priority'].apply(create_priority_sort_key)
+        df_with_priority = df_with_priority.sort_values('_priority_sort_key', kind='stable')
+        df_with_priority = df_with_priority.drop(columns=['_priority_sort_key', '_has_priority'])
+    else:
+        df_with_priority = df_with_priority.drop(columns=['_has_priority'])
+    
+    # Clean up the without priority DataFrame
+    if not df_without_priority.empty:
+        df_without_priority = df_without_priority.drop(columns=['_has_priority'])
+    
+    # Concatenate: prioritized first, then random order for the rest
+    df_sorted = pd.concat([df_with_priority, df_without_priority], ignore_index=True)
+    
+    return df_sorted
+
+
 def analyze_user_distribution_by_currency(df):
     """
     Analyzes the DataFrame by the 'register_currency' column, counting users per currency and calculating
@@ -211,20 +295,36 @@ def count_operators_per_campaign(df):
 
 def create_campaign_dataframes(available_users):
     """
-    Create dictionary of DataFrames by campaign
+    Create dictionary of DataFrames by campaign, pre-sorted by priority.
+    
+    Each campaign DataFrame is:
+    1. Randomized first (to break ties within same priority)
+    2. Sorted by priority (ULTRA-1, ULTRA-2, ALTA-1, etc.)
+    
+    This ensures that when filtered by currency later, the priority order is maintained.
     
     Args:
         available_users (pd.DataFrame): DataFrame with all available users
     
     Returns:
-        dict: Diccionario con {campaign_name: DataFrame}
+        dict: Dictionary with {campaign_name: DataFrame sorted by priority}
     """
+    np.random.seed(42)  # Ensure repeatability
+    
     campaign_dfs = {}
     unique_campaigns = available_users['campaign_name'].unique()
     
     for campaign in unique_campaigns:
-        campaign_dfs[campaign] = available_users[available_users['campaign_name'] == campaign].copy()
-        print(f"{campaign}_df: {len(campaign_dfs[campaign])} users")
+        campaign_df = available_users[available_users['campaign_name'] == campaign].copy()
+        
+        # First randomize to break ties within same priority
+        campaign_df = campaign_df.sample(frac=1, random_state=42).reset_index(drop=True)
+        
+        # Then sort by campaign priority (ULTRA-1, ULTRA-2, ALTA-1, etc.)
+        # This ensures ALL ULTRA-1 users (across all currencies) come before ULTRA-2
+        campaign_df = sort_by_priority(campaign_df)
+        
+        campaign_dfs[campaign] = campaign_df
     
     return campaign_dfs
 
@@ -322,10 +422,9 @@ def assign_currencies(assignment_dict, currency_list, campaign_dfs, max_percent=
         campaign_df = campaign_dfs[campaign]
 
         # Filter users of specified currencies
-        currency_users = campaign_df[campaign_df['register_currency'].isin(currency_list)]
-        
-        # Randomize DataFrame for random assignment
-        currency_users = currency_users.sample(frac=1, random_state=42).reset_index(drop=True)
+        # Note: campaign_df is already sorted by priority from create_campaign_dataframes()
+        # so we just filter without re-sorting to maintain global priority order
+        currency_users = campaign_df[campaign_df['register_currency'].isin(currency_list)].copy()
 
         if len(operators_info) == 0:
             print(f"No operators for campaign {campaign}. Skipping...")
@@ -545,8 +644,10 @@ def complete_assignments(remaining_users_df, remaining_assignments_dict, extra_u
     # Keep a copy of available users that gets updated after each assignment
     available_users = remaining_users_df.copy()
     
-    # Randomize DataFrame for random assignment
-    available_users = available_users.sample(frac=1, random_state=42).reset_index(drop=True)
+    # Sort by campaign priority without re-randomizing
+    # (users were already randomized when campaign_dfs were created)
+    # This ensures ULTRA-1 users are assigned before ULTRA-2, etc.
+    available_users = sort_by_priority(available_users)
 
     for campaign, operators_info in remaining_assignments_dict.items():
         if len(operators_info) == 0:

@@ -98,7 +98,7 @@ def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], cr
         available_users['campaign_details'] = None
 
     # Select relevant columns
-    col = ['assignment_date', 'campaign_name', 'campaign_details', 'user_id', 'username', 'firstLast_name', 'phone', 'level',
+    col = ['assignment_date', 'campaign_name', 'priority', 'campaign_details', 'user_id', 'username', 'firstLast_name', 'phone', 'level',
            'register_currency', 'last_activity']
     available_users = available_users[col]
 

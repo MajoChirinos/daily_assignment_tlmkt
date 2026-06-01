@@ -87,24 +87,29 @@ def run_daily_assignment(request) -> str:
         daily_assigment_hist['campaign_name'] = daily_assigment_hist['campaign_name'].apply(normalize_campaign_to_code)
         daily_assigment_hist = daily_assigment_hist[daily_assigment_hist['assignment_date'] < today]
 
+        # ========== EMAIL MARKETING HISTORICAL DATA (COMMENTED FOR FUTURE USE) ==========
+        # TODO: Uncomment this section when email marketing exclusion goes to production
         # Historical assignment users from email marketing
-        try:
-            email_mkt_hist = get_data_hist('email_mkt_DailyAssignment', days_ago_to_discard, credentials=creds)
-        except Exception as error:
-            print(f"Warning: Could not get email marketing historical data: {error}")
-            # Create empty DataFrame with same structure if table doesn't exist
-            email_mkt_hist = pd.DataFrame(columns=['user_id', 'campaign_name', 'assignment_date'])
-        
-        print(f"Email marketing historical users loaded: {email_mkt_hist.shape[0]}")
-        if not email_mkt_hist.empty:
-            email_mkt_hist['campaign_name'] = email_mkt_hist['campaign_name'].apply(normalize_campaign_to_code)
-            email_mkt_hist = email_mkt_hist[email_mkt_hist['assignment_date'] < today]
+        # try:
+        #     email_mkt_hist = get_data_hist('email_mkt_DailyAssignment', days_ago_to_discard, credentials=creds)
+        # except Exception as error:
+        #     print(f"Warning: Could not get email marketing historical data: {error}")
+        #     # Create empty DataFrame with same structure if table doesn't exist
+        #     email_mkt_hist = pd.DataFrame(columns=['user_id', 'campaign_name', 'assignment_date'])
+        # 
+        # print(f"Email marketing historical users loaded: {email_mkt_hist.shape[0]}")
+        # if not email_mkt_hist.empty:
+        #     email_mkt_hist['campaign_name'] = email_mkt_hist['campaign_name'].apply(normalize_campaign_to_code)
+        #     email_mkt_hist = email_mkt_hist[email_mkt_hist['assignment_date'] < today]
 
-        # Users to discard (concatenate both telemarketing and email marketing users)
+
+        # Users to discard (only telemarketing for now)
         tlmkt_users_to_discard = daily_assigment_hist[['user_id', 'campaign_name']]
-        email_users_to_discard = email_mkt_hist[['user_id', 'campaign_name']]
-        users_to_discard = pd.concat([tlmkt_users_to_discard, email_users_to_discard], ignore_index=True)
-        print(f"Total users to discard: {users_to_discard.shape[0]} (TLMKT: {tlmkt_users_to_discard.shape[0]}, Email MKT: {email_users_to_discard.shape[0]})")
+        # email_users_to_discard = email_mkt_hist[['user_id', 'campaign_name']]  # Commented - not in production yet
+        users_to_discard = tlmkt_users_to_discard.copy()  # Only TLMKT users for now
+        # users_to_discard = pd.concat([tlmkt_users_to_discard, email_users_to_discard], ignore_index=True)  # Use this when email marketing goes live
+        print(f"Total users to discard: {users_to_discard.shape[0]} (TLMKT only)")
+        # print(f"Total users to discard: {users_to_discard.shape[0]} (TLMKT: {tlmkt_users_to_discard.shape[0]}, Email MKT: {email_users_to_discard.shape[0]})")  # Use this when email marketing goes live
 
         # Segment tables to assign
         try:
@@ -136,13 +141,26 @@ def run_daily_assignment(request) -> str:
         available_users = available_users[available_users['_merge'] == 'left_only'].drop(columns=['_merge'])
 
         print(f"Available users for assignment: {available_users.shape[0]}")
+        
+        # Show users by campaign after filtering
+        if not available_users.empty:
+            print("\nUsers available per campaign after filtering contacted users:")
+            users_per_campaign = available_users.groupby('campaign_name').size().sort_values(ascending=False)
+            for campaign, count in users_per_campaign.items():
+                print(f"  • {campaign} Campaign: {count} users")
+                # Show currency distribution per campaign
+                campaign_currencies = available_users[available_users['campaign_name'] == campaign]['register_currency'].value_counts()
+                currency_info = ", ".join([f"{curr}: {cnt}" for curr, cnt in campaign_currencies.items()])
+                print(f"    Currency Distribution: {currency_info}")
+        else:
+            print("⚠️ No users available for any campaign after filtering!")
 
         # Create dictionary of DataFrames by campaign 
         campaign_dfs = create_campaign_dataframes(available_users)
 
         # ========== USER ASSIGNMENT ==========
         # Create assignment dictionary
-        print("Creating assignment dictionary...")
+        print("\nCreating assignment dictionary...")
         assignment_dict = {}
 
         # Define percentages according to number of assigned campaigns
@@ -176,34 +194,68 @@ def run_daily_assignment(request) -> str:
                         })
 
         print("Assignment Dictionary created successfully.")
+        
+        # Show assignment dictionary details
+        print("\n Assignment Dictionary Summary:")
+        for campaign, operators_list in assignment_dict.items():
+            total_to_assign = sum(op['users_to_assign'] for op in operators_list)
+            operator_names = [op['operator'] for op in operators_list]
+            print(f"  • {campaign}: {len(operators_list)} operators, {total_to_assign} users to assign")
 
         # Priority Currencies Assignment
-        print("Assigning Priority Currencies...")
+        print("\n" + "="*80)
+        print("STEP 1: Assigning Priority Currencies...")
+        print(f"Priority currencies: {priority_currencies}")
+        print(f"Max percent per currency: {max_priority_currencies_percent}")
         try:
             priority_curr_assign, priority_curr_rem = assign_currencies(assignment_dict, priority_currencies, campaign_dfs, 
                                                 max_percent=max_priority_currencies_percent, 
                                                 split_percentage=True)
+            print(f"Priority currencies assigned: {len(priority_curr_assign)} users")
+            if not priority_curr_assign.empty:
+                print("   Distribution by campaign:")
+                for campaign in priority_curr_assign['campaign'].unique():
+                    count = len(priority_curr_assign[priority_curr_assign['campaign'] == campaign])
+                    print(f"     • {campaign}: {count} users")
         except Exception as error:
             print(f"Error assigning priority currencies: {error}")
             return f"Error: Failed to assign priority currencies - {error}"
     
         
         # Small Currencies Assignment
-        print("Assigning Small Currencies...")
+        print("\n" + "="*80)
+        print("STEP 2: Assigning Small Currencies...")
+        print(f"Small currencies: {small_currencies_to_limit}")
+        print(f"Max percent total: {max_small_currencies_percent}")
         try:
             small_curr_assign, small_curr_rem = assign_currencies(assignment_dict, small_currencies_to_limit, campaign_dfs, 
                                                 max_percent=max_small_currencies_percent, 
                                                 split_percentage=False)
+            print(f"Small currencies assigned: {len(small_curr_assign)} users")
+            if not small_curr_assign.empty:
+                print("   Distribution by campaign:")
+                for campaign in small_curr_assign['campaign'].unique():
+                    count = len(small_curr_assign[small_curr_assign['campaign'] == campaign])
+                    print(f"     • {campaign}: {count} users")
         except Exception as error:
             print(f"Error assigning small currencies: {error}")
             return f"Error: Failed to assign small currencies - {error}"
         
         # Big Currencies Assignment
-        print("Assigning Big Currencies...")
+        print("\n" + "="*80)
+        print("STEP 3: Assigning Big Currencies...")
+        print(f"Big currencies: {big_currencies_to_limit}")
+        print(f"Max percent per currency: {max_big_currencies_percent}")
         try:
             big_curr_assign, big_curr_rem = assign_currencies(assignment_dict, big_currencies_to_limit, campaign_dfs, 
                                                         max_percent=max_big_currencies_percent,
                                                         split_percentage=True)
+            print(f"Big currencies assigned: {len(big_curr_assign)} users")
+            if not big_curr_assign.empty:
+                print("   Distribution by campaign:")
+                for campaign in big_curr_assign['campaign'].unique():
+                    count = len(big_curr_assign[big_curr_assign['campaign'] == campaign])
+                    print(f"     • {campaign}: {count} users")
         except Exception as error:
             print(f"Error assigning big currencies: {error}")
             return f"Error: Failed to assign big currencies - {error}"
@@ -213,11 +265,20 @@ def run_daily_assignment(request) -> str:
         remaining_assignments_dict = calculate_remaining_assignments_dict(assigned_users, assignment_dict)
 
         # Relevant Currencies Assignment
-        print("Assigning Relevant Currencies...")
+        print("\n" + "="*80)
+        print("STEP 4: Assigning Relevant Currencies...")
+        print(f"Relevant currencies: {relevant_currencies}")
+        print(f"Remaining assignments to fill: {sum(sum(op['users_to_assign'] for op in ops) for ops in remaining_assignments_dict.values())} users")
         try:
             relevant_curr_assign, relevant_curr_rem = assign_currencies(remaining_assignments_dict, relevant_currencies, campaign_dfs, 
                                                 max_percent=None, 
                                                 split_percentage=False)
+            print(f"Relevant currencies assigned: {len(relevant_curr_assign)} users")
+            if not relevant_curr_assign.empty:
+                print("   Distribution by campaign:")
+                for campaign in relevant_curr_assign['campaign'].unique():
+                    count = len(relevant_curr_assign[relevant_curr_assign['campaign'] == campaign])
+                    print(f"     • {campaign}: {count} users")
         except Exception as error:
             print(f"Error assigning relevant currencies: {error}")
             return f"Error: Failed to assign relevant currencies - {error}"
@@ -232,7 +293,11 @@ def run_daily_assignment(request) -> str:
         remaining_assignments_dict = calculate_remaining_assignments_dict(assigned_users, assignment_dict)
 
         # Complete Assignment
-        print("Completing Assignment with Additional Users...")
+        print("\n" + "="*80)
+        print("STEP 5: Completing Assignment with Additional Users...")
+        print(f"Extra users campaigns: {extra_users_campaign}")
+        print(f"Remaining users available: {len(remaining_users)}")
+        print(f"Still need to assign: {sum(sum(op['users_to_assign'] for op in ops) for ops in remaining_assignments_dict.values())} users")
         try:
             complete_curr_assign, remaining_users_after_assigment = complete_assignments(
                 remaining_users,
@@ -241,19 +306,39 @@ def run_daily_assignment(request) -> str:
                 priority_currencies,
                 relevant_currencies
             )
+            print(f"Additional users assigned: {len(complete_curr_assign)} users")
+            if not complete_curr_assign.empty:
+                print("   Distribution by campaign:")
+                for campaign in complete_curr_assign['campaign'].unique():
+                    count = len(complete_curr_assign[complete_curr_assign['campaign'] == campaign])
+                    print(f"     • {campaign}: {count} users")
         except Exception as error:
             print(f"Error completing assignments: {error}")
             return f"Error: Failed to complete assignments - {error}"
 
         # Concatenate all assigned users
         assigned_users = pd.concat([priority_curr_assign, small_curr_assign, big_curr_assign, relevant_curr_assign, complete_curr_assign], ignore_index=True)
+        print("\n" + "="*80)
         print("User assignment process completed successfully.")
-
+        print(f"\nFINAL ASSIGNMENT SUMMARY:")
+        print(f"   Total users assigned: {len(assigned_users)}")
+        
+        # Show summary by campaign
+        if not assigned_users.empty:
+            print(f"\n   Assignment by campaign:")
+            campaign_summary = assigned_users.groupby('campaign').agg({
+                'user_id': 'count',
+                'operator': 'nunique'
+            }).rename(columns={'user_id': 'users', 'operator': 'operators'})
+            for campaign, row in campaign_summary.iterrows():
+                print(f"     • {campaign}: {row['users']} users assigned to {row['operators']} operators")
+        
+        print("\nAssigned users per operator:")
         print(count_users_per_operator(assigned_users))
         
         # ========== CREATE ASSIGNMENT METRICS ==========
         # Create metrics DataFrame with available and assigned users per campaign
-        print("Creating assignment metrics...")
+        print("\nCreating assignment metrics...")
         assignment_metrics = create_assignment_metrics(campaign_dfs, assigned_users, today)
         
         # Keep internal campaign codes for consistency with the rest of the system
@@ -263,10 +348,11 @@ def run_daily_assignment(request) -> str:
         assignment_metrics['assignment_date'] = pd.to_datetime(assignment_metrics['assignment_date'], format='%Y%m%d')
         
         print("Assignment metrics created successfully.")
+        print("\nAssignment Metrics:")
         print(assignment_metrics)
         
         # Save assignment metrics locally
-        print("Saving assignment metrics to local file...")
+        print("\nSaving assignment metrics to local file...")
         try:
             assignment_metrics.to_excel(f'./data/Assignment_Metrics_{today}.xlsx', index=False)
             print("Assignment metrics saved to local file.")
@@ -297,6 +383,7 @@ def run_daily_assignment(request) -> str:
             'operator', 
             'campaign_name',
             'campaign_details',
+            'priority',
             'user_id',
             'username',
             'firstLast_name',
@@ -323,7 +410,7 @@ def run_daily_assignment(request) -> str:
 
         # Create Assignment data dictionary
         dict_tlmkt_assignment = {
-            'DailyAssignment': assigned_users[['assignment_date', 'operator', 'campaign_name', 'campaign_details',
+            'DailyAssignment': assigned_users[['assignment_date', 'operator', 'campaign_name', 'campaign_details', 'priority',
             'user_id', 'username', 'firstLast_name', 'phone', 'level', 'register_currency', 'last_activity']],
             'AssignmentMetrics': assignment_metrics[['assignment_date', 'campaign', 'available_users', 'assigned_users', 'unassigned_users']]
         }
@@ -337,7 +424,7 @@ def run_daily_assignment(request) -> str:
                              prefix='tlmkt_', 
                              deleted_if_exist=False, 
                              load_data=False, 
-                             delete_today=True)
+                             delete_today=False)
         except Exception as error:
             print(f"Error loading data to BigQuery: {error}")
             return f"Error: Failed to load data to BigQuery - {error}"
