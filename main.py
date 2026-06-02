@@ -12,9 +12,8 @@ from src.transform import (
     normalize_campaign_to_code,
     normalize_campaign_to_display,
     create_campaign_dataframes,
-    assign_currencies,
-    calculate_remaining_assignments_dict,
-    complete_assignments,
+    create_priority_sort_key,
+    assign_users_by_country,
     count_users_per_operator,
     create_assignment_metrics
 )
@@ -25,10 +24,27 @@ def run_daily_assignment(request) -> str:
     try:
         creds, project = default()
 
+        # Normalize LP country/country-code values to register_currency codes used by users data.
+        country_to_currency = {
+            'VE': 'VES', 'VES': 'VES', 'VENEZUELA': 'VES',
+            'CL': 'CLP', 'CLP': 'CLP', 'CHILE': 'CLP',
+            'PE': 'PEN', 'PEN': 'PEN', 'PERU': 'PEN', 'PERU\u0301': 'PEN',
+            'EC': 'USD', 'ECUADOR': 'USD',
+            'US': 'USD', 'USA': 'USD', 'USD': 'USD',
+            'GT': 'GTQ', 'GTQ': 'GTQ', 'GUATEMALA': 'GTQ',
+            'HN': 'HNL', 'HNL': 'HNL', 'HONDURAS': 'HNL',
+            'MX': 'MXN', 'MXN': 'MXN', 'MEXICO': 'MXN', 'ME\u0301XICO': 'MXN',
+            'CR': 'CRC', 'CRC': 'CRC', 'COSTARICA': 'CRC', 'COSTA RICA': 'CRC'
+        }
+
+        def normalize_country_to_currency(value):
+            text = str(value).strip().upper()
+            return country_to_currency.get(text, text)
+
         # ========== ASSIGNMENT CONFIGURATION ==========
         # Read configuration file
         try:
-            conf = read_google_sheet('Daily_Assignment_Configuration', 0)
+            conf = read_google_sheet('Daily_Assignment_Configuration', 2)
         except Exception as error:
             print(f"Error reading configuration from Google Sheets: {error}")
             return f"Error: Failed to read configuration - {error}"
@@ -38,21 +54,23 @@ def run_daily_assignment(request) -> str:
 
         # Variable declaration from Config class
         days_ago_to_discard = config.days_ago_to_discard
+        exclude_email_mkt_users = config.exclude_email_mkt_users
+        if isinstance(exclude_email_mkt_users, str):
+            exclude_email_mkt_users = exclude_email_mkt_users.strip().lower() in (
+                'true', '1', 'yes', 'y', 'si', 's'
+            )
         users_to_assign_per_operator = config.users_to_assign_per_operator
         currencies_to_filter = config.currencies_to_filter
-        priority_currencies = config.priority_currencies
-        max_priority_currencies_percent = config.max_priority_currencies_percent
-        small_currencies_to_limit = config.small_currencies_to_limit
-        max_small_currencies_percent = config.max_small_currencies_percent
-        big_currencies_to_limit = config.big_currencies_to_limit
-        max_big_currencies_percent = config.max_big_currencies_percent
-        relevant_currencies = config.relevant_currencies
-        extra_users_campaign = config.extra_users_campaign
+        campaigns_to_filter = config.campaigns_to_filter
+        extra_users_country = getattr(config, 'extra_users_country', [])
+
+        #print(f"exclude_email_mkt_users: {exclude_email_mkt_users}")
 
         # ========== DATES TO USE ==========
-        today = datetime.now() - timedelta(days=0)
-        today = datetime(today.year, today.month, today.day)
-        today = datetime.strftime(today, '%Y-%m-%d').replace('-', '')
+        today_dt = datetime.now()
+        today_midnight = datetime(today_dt.year, today_dt.month, today_dt.day)
+        today = datetime.strftime(today_midnight, '%Y-%m-%d').replace('-', '')
+        yesterday_str = datetime.strftime(today_midnight - timedelta(days=1), '%Y-%m-%d')
 
         days_ago_to_discard = datetime.now() - timedelta(days=days_ago_to_discard)
         days_ago_to_discard = datetime(days_ago_to_discard.year, days_ago_to_discard.month, days_ago_to_discard.day)
@@ -69,12 +87,39 @@ def run_daily_assignment(request) -> str:
         lp = lp[lp['Cargo'] == 'Ejecutivo de Televentas']
         lp = lp[lp['Estatus'] == 'Activo']
         lp.rename(columns={'Nombre y Apellido': 'operator',
-                        'Usuario DotPanel' : 'user_dotpanel',
-                        'Campaña' : 'campaign_name'}, inplace=True)
-        
-        # Apply campaign normalization using imported function
-        lp['campaign_name'] = lp['campaign_name'].apply(normalize_campaign_to_code)
-        lp['campaign_name'] = lp['campaign_name'].str.split(',\s*')
+                        'Usuario DotPanel' : 'user_dotpanel'}, inplace=True)
+
+        if 'País' in lp.columns:
+            lp.rename(columns={'País': 'country'}, inplace=True)
+        elif 'Pais' in lp.columns:
+            lp.rename(columns={'Pais': 'country'}, inplace=True)
+        else:
+            return "Error: LP_TLMKT is missing country column (País/Pais)"
+
+        lp['country'] = lp['country'].astype(str).str.upper().str.split(',\s*')
+        original_lp_countries = (
+            lp[['country']]
+            .explode('country')['country']
+            .dropna()
+            .astype(str)
+            .str.upper()
+            .unique()
+            .tolist()
+        )
+        lp['country'] = lp['country'].apply(
+            lambda countries: [
+                normalize_country_to_currency(country)
+                for country in countries
+                if str(country).strip()
+            ]
+        )
+
+        # Normalize fallback countries from config to same currency code standard.
+        extra_users_country = [
+            normalize_country_to_currency(country)
+            for country in extra_users_country
+            if str(country).strip()
+        ]
 
         # Historical assignment users from telemarketing
         try:
@@ -85,31 +130,29 @@ def run_daily_assignment(request) -> str:
         
         print(f"Telemarketing historical users loaded: {daily_assigment_hist.shape[0]}")
         daily_assigment_hist['campaign_name'] = daily_assigment_hist['campaign_name'].apply(normalize_campaign_to_code)
-        daily_assigment_hist = daily_assigment_hist[daily_assigment_hist['assignment_date'] < today]
+        # Exclude today's assignments from discard; keep yesterday and older.
+        daily_assigment_hist = daily_assigment_hist[daily_assigment_hist['assignment_date'] < today_midnight]
 
-        # ========== EMAIL MARKETING HISTORICAL DATA (COMMENTED FOR FUTURE USE) ==========
-        # TODO: Uncomment this section when email marketing exclusion goes to production
-        # Historical assignment users from email marketing
-        # try:
-        #     email_mkt_hist = get_data_hist('email_mkt_DailyAssignment', days_ago_to_discard, credentials=creds)
-        # except Exception as error:
-        #     print(f"Warning: Could not get email marketing historical data: {error}")
-        #     # Create empty DataFrame with same structure if table doesn't exist
-        #     email_mkt_hist = pd.DataFrame(columns=['user_id', 'campaign_name', 'assignment_date'])
-        # 
-        # print(f"Email marketing historical users loaded: {email_mkt_hist.shape[0]}")
-        # if not email_mkt_hist.empty:
-        #     email_mkt_hist['campaign_name'] = email_mkt_hist['campaign_name'].apply(normalize_campaign_to_code)
-        #     email_mkt_hist = email_mkt_hist[email_mkt_hist['assignment_date'] < today]
-
-
-        # Users to discard (only telemarketing for now)
+        # Users to discard (telemarketing + optional email marketing)
         tlmkt_users_to_discard = daily_assigment_hist[['user_id', 'campaign_name']]
-        # email_users_to_discard = email_mkt_hist[['user_id', 'campaign_name']]  # Commented - not in production yet
-        users_to_discard = tlmkt_users_to_discard.copy()  # Only TLMKT users for now
-        # users_to_discard = pd.concat([tlmkt_users_to_discard, email_users_to_discard], ignore_index=True)  # Use this when email marketing goes live
-        print(f"Total users to discard: {users_to_discard.shape[0]} (TLMKT only)")
-        # print(f"Total users to discard: {users_to_discard.shape[0]} (TLMKT: {tlmkt_users_to_discard.shape[0]}, Email MKT: {email_users_to_discard.shape[0]})")  # Use this when email marketing goes live
+        users_to_discard = tlmkt_users_to_discard.copy()
+
+        if exclude_email_mkt_users:
+            try:
+                email_mkt_hist = get_data_hist('email_mkt_DailyAssignment', days_ago_to_discard, credentials=creds)
+                print(f"Email marketing historical users loaded: {email_mkt_hist.shape[0]}")
+                if not email_mkt_hist.empty:
+                    email_mkt_hist['campaign_name'] = email_mkt_hist['campaign_name'].apply(normalize_campaign_to_code)
+                    # Exclude today's assignments from discard; keep yesterday and older.
+                    email_mkt_hist = email_mkt_hist[email_mkt_hist['assignment_date'] < today_midnight]
+                    email_users_to_discard = email_mkt_hist[['user_id', 'campaign_name']]
+                    users_to_discard = pd.concat([users_to_discard, email_users_to_discard], ignore_index=True)
+            except Exception as error:
+                print(f"Warning: Could not load email marketing history, continuing with TLMKT only: {error}")
+        else:
+            print("Skipping email marketing historical load (exclude_email_mkt_users=False)")
+
+        print(f"Total users to discard: {users_to_discard.shape[0]}")
 
         # Segment tables to assign
         try:
@@ -129,8 +172,15 @@ def run_daily_assignment(request) -> str:
             return f"Error: Failed to extract data - {error}"
         print("Data extracted successfully")
 
+
+
+        if campaigns_to_filter:
+            print(f"Filtering campaigns from config: {campaigns_to_filter}")
+            available_users = available_users[~available_users['campaign_name'].isin(campaigns_to_filter)]
+            print(f"Users after campaign filter: {available_users.shape[0]}")
+
         # Remove users contacted 'days_ago_to_discard' ago (users_to_discard)
-        print(f"Discarding users contacted since {days_ago_to_discard}")
+        print(f"Discarding users contacted from {days_ago_to_discard} to {yesterday_str}")
         available_users = available_users.merge(
             users_to_discard, 
             on=['user_id', 'campaign_name'], 
@@ -141,6 +191,12 @@ def run_daily_assignment(request) -> str:
         available_users = available_users[available_users['_merge'] == 'left_only'].drop(columns=['_merge'])
 
         print(f"Available users for assignment: {available_users.shape[0]}")
+
+        # Summary of available users by currency (after discarding contacted users)
+        print("\nAvailable users by currency (after discarding contacted users):")
+        currency_summary = available_users['register_currency'].value_counts()
+        for currency, count in currency_summary.items():
+            print(f"  \u2022 {currency}: {count} users")
         
         # Show users by campaign after filtering
         if not available_users.empty:
@@ -152,6 +208,33 @@ def run_daily_assignment(request) -> str:
                 campaign_currencies = available_users[available_users['campaign_name'] == campaign]['register_currency'].value_counts()
                 currency_info = ", ".join([f"{curr}: {cnt}" for curr, cnt in campaign_currencies.items()])
                 print(f"    Currency Distribution: {currency_info}")
+
+            # Operators assignment visibility by country
+            print("\nOperators assigned by country:")
+            lp_by_country = lp[['operator', 'country']].explode('country').copy()
+            lp_by_country['country'] = lp_by_country['country'].astype(str).str.strip().str.upper()
+            lp_by_country = lp_by_country[lp_by_country['country'] != '']
+
+            for country, group in lp_by_country.groupby('country'):
+                operators = sorted(group['operator'].dropna().astype(str).unique().tolist())
+                print(f"  • {country}: {len(operators)} operators")
+                print(f"    Operators: {', '.join(operators)}")
+
+            # Priority visibility before assignment
+            print("\nAvailable users by campaign and priority:")
+            available_priority = (
+                available_users
+                .groupby(['campaign_name', 'priority'], dropna=False)
+                .size()
+                .reset_index(name='users')
+            )
+            available_priority['_priority_key'] = available_priority['priority'].apply(create_priority_sort_key)
+            available_priority['_priority_key'] = available_priority['_priority_key'].apply(
+                lambda key: key if key is not None else (99, 99)
+            )
+            available_priority = available_priority.sort_values(['_priority_key', 'campaign_name'])
+            for _, row in available_priority.iterrows():
+                print(f"  • {row['campaign_name']} | {row['priority']}: {row['users']}")
         else:
             print("⚠️ No users available for any campaign after filtering!")
 
@@ -163,166 +246,87 @@ def run_daily_assignment(request) -> str:
         print("\nCreating assignment dictionary...")
         assignment_dict = {}
 
-        # Define percentages according to number of assigned campaigns
+        # Define percentages according to number of assigned countries per operator
         percentages = {
-            1: [1.0],  # 100% for single campaign
-            2: [0.7, 0.3],  # 70% and 30% for two campaigns
-            3: [0.5, 0.3, 0.2]  # 50%, 30% and 20% for three campaigns
+            1: [1.0],
+            2: [0.7, 0.3],
+            3: [0.5, 0.3, 0.2]
         }
 
-        # Iterate over operators in lp DataFrame
+        # Iterate over operators in LP and build quotas by country
         for _, row in lp.iterrows():
             operator = row['operator']
-            campaigns = row['campaign_name']  # List of campaigns assigned to operator
-            num_campaigns = len(campaigns)  # Number of campaigns assigned to operator
+            countries = row['country']
 
-            # Check if there are defined percentages for this number of campaigns
-            if num_campaigns in percentages:
-                for idx, campaign in enumerate(campaigns):
-                    if idx < len(percentages[num_campaigns]):  # Check if there's a defined percentage for this position
-                        # Calculate users to assign rounding to nearest integer
-                        users_to_assign = round(users_to_assign_per_operator * percentages[num_campaigns][idx])
-                        
-                        # Initialize campaign in dictionary if it doesn't exist
-                        if campaign not in assignment_dict:
-                            assignment_dict[campaign] = []
-                        
-                        # Add operator and assigned users to campaign
-                        assignment_dict[campaign].append({
-                            'operator': operator,
-                            'users_to_assign': users_to_assign
-                        })
+            if not isinstance(countries, list):
+                countries = [countries]
+
+            countries = [str(country).strip().upper() for country in countries if str(country).strip()]
+            num_countries = len(countries)
+
+            if num_countries == 0:
+                continue
+
+            if num_countries in percentages:
+                country_percentages = percentages[num_countries]
+            else:
+                # Fallback: split equally when operator has more than 3 countries
+                country_percentages = [1 / num_countries] * num_countries
+
+            for idx, country in enumerate(countries):
+                users_to_assign = round(users_to_assign_per_operator * country_percentages[idx])
+
+                if country not in assignment_dict:
+                    assignment_dict[country] = []
+
+                assignment_dict[country].append({
+                    'operator': operator,
+                    'users_to_assign': users_to_assign
+                })
 
         print("Assignment Dictionary created successfully.")
-        
-        # Show assignment dictionary details
-        print("\n Assignment Dictionary Summary:")
-        for campaign, operators_list in assignment_dict.items():
-            total_to_assign = sum(op['users_to_assign'] for op in operators_list)
-            operator_names = [op['operator'] for op in operators_list]
-            print(f"  • {campaign}: {len(operators_list)} operators, {total_to_assign} users to assign")
 
-        # Priority Currencies Assignment
+
         print("\n" + "="*80)
-        print("STEP 1: Assigning Priority Currencies...")
-        print(f"Priority currencies: {priority_currencies}")
-        print(f"Max percent per currency: {max_priority_currencies_percent}")
+        print("Assigning users by country with global priority order...")
+        if extra_users_country:
+            print(f"Fallback countries to complete assignments: {extra_users_country}")
+        else:
+            print("No fallback countries configured — incomplete assignments will not be filled.")
         try:
-            priority_curr_assign, priority_curr_rem = assign_currencies(assignment_dict, priority_currencies, campaign_dfs, 
-                                                max_percent=max_priority_currencies_percent, 
-                                                split_percentage=True)
-            print(f"Priority currencies assigned: {len(priority_curr_assign)} users")
-            if not priority_curr_assign.empty:
-                print("   Distribution by campaign:")
-                for campaign in priority_curr_assign['campaign'].unique():
-                    count = len(priority_curr_assign[priority_curr_assign['campaign'] == campaign])
-                    print(f"     • {campaign}: {count} users")
-        except Exception as error:
-            print(f"Error assigning priority currencies: {error}")
-            return f"Error: Failed to assign priority currencies - {error}"
-    
-        
-        # Small Currencies Assignment
-        print("\n" + "="*80)
-        print("STEP 2: Assigning Small Currencies...")
-        print(f"Small currencies: {small_currencies_to_limit}")
-        print(f"Max percent total: {max_small_currencies_percent}")
-        try:
-            small_curr_assign, small_curr_rem = assign_currencies(assignment_dict, small_currencies_to_limit, campaign_dfs, 
-                                                max_percent=max_small_currencies_percent, 
-                                                split_percentage=False)
-            print(f"Small currencies assigned: {len(small_curr_assign)} users")
-            if not small_curr_assign.empty:
-                print("   Distribution by campaign:")
-                for campaign in small_curr_assign['campaign'].unique():
-                    count = len(small_curr_assign[small_curr_assign['campaign'] == campaign])
-                    print(f"     • {campaign}: {count} users")
-        except Exception as error:
-            print(f"Error assigning small currencies: {error}")
-            return f"Error: Failed to assign small currencies - {error}"
-        
-        # Big Currencies Assignment
-        print("\n" + "="*80)
-        print("STEP 3: Assigning Big Currencies...")
-        print(f"Big currencies: {big_currencies_to_limit}")
-        print(f"Max percent per currency: {max_big_currencies_percent}")
-        try:
-            big_curr_assign, big_curr_rem = assign_currencies(assignment_dict, big_currencies_to_limit, campaign_dfs, 
-                                                        max_percent=max_big_currencies_percent,
-                                                        split_percentage=True)
-            print(f"Big currencies assigned: {len(big_curr_assign)} users")
-            if not big_curr_assign.empty:
-                print("   Distribution by campaign:")
-                for campaign in big_curr_assign['campaign'].unique():
-                    count = len(big_curr_assign[big_curr_assign['campaign'] == campaign])
-                    print(f"     • {campaign}: {count} users")
-        except Exception as error:
-            print(f"Error assigning big currencies: {error}")
-            return f"Error: Failed to assign big currencies - {error}"
-
-        # Union of assignments and Assignment Dictionary update
-        assigned_users = pd.concat([priority_curr_assign, small_curr_assign, big_curr_assign], ignore_index=True)
-        remaining_assignments_dict = calculate_remaining_assignments_dict(assigned_users, assignment_dict)
-
-        # Relevant Currencies Assignment
-        print("\n" + "="*80)
-        print("STEP 4: Assigning Relevant Currencies...")
-        print(f"Relevant currencies: {relevant_currencies}")
-        print(f"Remaining assignments to fill: {sum(sum(op['users_to_assign'] for op in ops) for ops in remaining_assignments_dict.values())} users")
-        try:
-            relevant_curr_assign, relevant_curr_rem = assign_currencies(remaining_assignments_dict, relevant_currencies, campaign_dfs, 
-                                                max_percent=None, 
-                                                split_percentage=False)
-            print(f"Relevant currencies assigned: {len(relevant_curr_assign)} users")
-            if not relevant_curr_assign.empty:
-                print("   Distribution by campaign:")
-                for campaign in relevant_curr_assign['campaign'].unique():
-                    count = len(relevant_curr_assign[relevant_curr_assign['campaign'] == campaign])
-                    print(f"     • {campaign}: {count} users")
-        except Exception as error:
-            print(f"Error assigning relevant currencies: {error}")
-            return f"Error: Failed to assign relevant currencies - {error}"
-
-        # Concatenation of assigned users and available users for assignment for different Currency types
-        assigned_users = pd.concat([priority_curr_assign, small_curr_assign, big_curr_assign, relevant_curr_assign], ignore_index=True)
-        remaining_users = pd.concat([priority_curr_rem, small_curr_rem, big_curr_rem, relevant_curr_rem], ignore_index=True)
-
-        # Update Assignment Dictionary
-        print("Updating Assignment Dictionary...")
-
-        remaining_assignments_dict = calculate_remaining_assignments_dict(assigned_users, assignment_dict)
-
-        # Complete Assignment
-        print("\n" + "="*80)
-        print("STEP 5: Completing Assignment with Additional Users...")
-        print(f"Extra users campaigns: {extra_users_campaign}")
-        print(f"Remaining users available: {len(remaining_users)}")
-        print(f"Still need to assign: {sum(sum(op['users_to_assign'] for op in ops) for ops in remaining_assignments_dict.values())} users")
-        try:
-            complete_curr_assign, remaining_users_after_assigment = complete_assignments(
-                remaining_users,
-                remaining_assignments_dict,
-                extra_users_campaign,
-                priority_currencies,
-                relevant_currencies
+            assigned_users, remaining_users = assign_users_by_country(
+                available_users,
+                assignment_dict,
+                extra_users_country=extra_users_country
             )
-            print(f"Additional users assigned: {len(complete_curr_assign)} users")
-            if not complete_curr_assign.empty:
-                print("   Distribution by campaign:")
-                for campaign in complete_curr_assign['campaign'].unique():
-                    count = len(complete_curr_assign[complete_curr_assign['campaign'] == campaign])
-                    print(f"     • {campaign}: {count} users")
         except Exception as error:
-            print(f"Error completing assignments: {error}")
-            return f"Error: Failed to complete assignments - {error}"
+            print(f"Error assigning users by country: {error}")
+            return f"Error: Failed to assign users by country - {error}"
 
-        # Concatenate all assigned users
-        assigned_users = pd.concat([priority_curr_assign, small_curr_assign, big_curr_assign, relevant_curr_assign, complete_curr_assign], ignore_index=True)
+        print(f"Users assigned: {len(assigned_users)}")
+        print(f"Users remaining unassigned: {len(remaining_users)}")
+
+        if not assigned_users.empty:
+            print("\nAssigned users by campaign and priority:")
+            assigned_priority = (
+                assigned_users
+                .groupby(['campaign', 'priority'], dropna=False)
+                .size()
+                .reset_index(name='users')
+            )
+            assigned_priority['_priority_key'] = assigned_priority['priority'].apply(create_priority_sort_key)
+            assigned_priority['_priority_key'] = assigned_priority['_priority_key'].apply(
+                lambda key: key if key is not None else (99, 99)
+            )
+            assigned_priority = assigned_priority.sort_values(['_priority_key', 'campaign'])
+            for _, row in assigned_priority.iterrows():
+                print(f"  • {row['campaign']} | {row['priority']}: {row['users']}")
+
         print("\n" + "="*80)
         print("User assignment process completed successfully.")
         print(f"\nFINAL ASSIGNMENT SUMMARY:")
         print(f"   Total users assigned: {len(assigned_users)}")
-        
+
         # Show summary by campaign
         if not assigned_users.empty:
             print(f"\n   Assignment by campaign:")
@@ -333,13 +337,36 @@ def run_daily_assignment(request) -> str:
             for campaign, row in campaign_summary.iterrows():
                 print(f"     • {campaign}: {row['users']} users assigned to {row['operators']} operators")
         
-        print("\nAssigned users per operator:")
-        print(count_users_per_operator(assigned_users))
+        print("\nAssigned users per operator (incomplete only):")
+        users_per_operator_df = count_users_per_operator(assigned_users)
+        users_per_operator_df = users_per_operator_df.rename(columns={'username': 'assigned_users'})
+
+        # Add assigned countries from LP for easier operational review.
+        operator_countries_df = lp[['operator', 'country']].copy()
+        operator_countries_df['assigned_countries'] = operator_countries_df['country'].apply(
+            lambda countries: ', '.join(sorted(set(countries))) if isinstance(countries, list) else str(countries)
+        )
+        operator_countries_df = operator_countries_df[['operator', 'assigned_countries']].drop_duplicates('operator')
+
+        users_per_operator_df = users_per_operator_df.merge(
+            operator_countries_df,
+            on='operator',
+            how='left'
+        )
+
+        incomplete_operators_df = users_per_operator_df[
+            users_per_operator_df['assigned_users'] < users_to_assign_per_operator
+        ].sort_values('assigned_users')
+
+        if incomplete_operators_df.empty:
+            print(f"All operators reached at least {users_to_assign_per_operator} assigned users.")
+        else:
+            print(incomplete_operators_df[['operator', 'assigned_countries', 'assigned_users']])
         
         # ========== CREATE ASSIGNMENT METRICS ==========
-        # Create metrics DataFrame with available and assigned users per campaign
+        # Create metrics DataFrame with available and assigned users per country and campaign
         print("\nCreating assignment metrics...")
-        assignment_metrics = create_assignment_metrics(campaign_dfs, assigned_users, today)
+        assignment_metrics = create_assignment_metrics(available_users, assigned_users, today)
         
         # Keep internal campaign codes for consistency with the rest of the system
         # assignment_metrics['campaign'] already has codes like: non_depositors, second_deposit, etc.
@@ -377,6 +404,16 @@ def run_daily_assignment(request) -> str:
         assigned_users['phone'] = assigned_users['phone'].astype(str)
         assigned_users['last_activity'] = pd.to_datetime(assigned_users['last_activity'])
 
+        # Sort for operator consumption: operator first, then highest priority to lowest.
+        assigned_users['_priority_key'] = assigned_users['priority'].apply(create_priority_sort_key)
+        assigned_users['_priority_key'] = assigned_users['_priority_key'].apply(
+            lambda key: key if key is not None else (99, 99)
+        )
+        assigned_users = assigned_users.sort_values(
+            ['operator', '_priority_key', 'campaign_name', 'user_id'],
+            ascending=[True, True, True, True]
+        )
+
         # Reorder columns
         column_order = [
             'assignment_date',
@@ -410,9 +447,11 @@ def run_daily_assignment(request) -> str:
 
         # Create Assignment data dictionary
         dict_tlmkt_assignment = {
-            'DailyAssignment': assigned_users[['assignment_date', 'operator', 'campaign_name', 'campaign_details', 'priority',
-            'user_id', 'username', 'firstLast_name', 'phone', 'level', 'register_currency', 'last_activity']],
-            'AssignmentMetrics': assignment_metrics[['assignment_date', 'campaign', 'available_users', 'assigned_users', 'unassigned_users']]
+            'DailyAssignment': assigned_users[['assignment_date', 'operator', 'campaign_name', 'user_id',
+            'username', 'firstLast_name', 'phone', 'level', 'register_currency', 'last_activity',
+            'campaign_details', 'priority']],
+            'AssignmentMetrics': assignment_metrics[['assignment_date', 'campaign', 'available_users',
+            'assigned_users', 'unassigned_users', 'country', 'priority']]
         }
 
         # Call to Loading function
@@ -423,7 +462,7 @@ def run_daily_assignment(request) -> str:
                              dataset_id='dm_telemarketing', 
                              prefix='tlmkt_', 
                              deleted_if_exist=False, 
-                             load_data=False, 
+                             load_data=True, 
                              delete_today=False)
         except Exception as error:
             print(f"Error loading data to BigQuery: {error}")

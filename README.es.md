@@ -3,12 +3,25 @@
 [English](README.md) | **Español**
 
 ## Descripción
-Sistema automatizado de asignación diaria de usuarios para operadores de telemarketing. El sistema distribuye usuarios de manera equitativa entre operadores considerando:
+Sistema automatizado de asignación diaria de usuarios para operadores de telemarketing. El proceso actual distribuye usuarios de manera equitativa por **país** y prioriza primero los usuarios de mayor prioridad dentro de cada país.
 
-- **Distribución por campañas**: Cada operador puede manejar 1-3 campañas específicas
-- **Balanceo por monedas**: Distribución inteligente según tipos de moneda (prioritarias, pequeñas, grandes, relevantes)
-- **Exclusión de usuarios contactados**: Evita contactar usuarios recientemente contactados por telemarketing o email marketing según configuración
-- **Algoritmo de asignación proporcional**: Distribución porcentual según número de campañas asignadas
+El sistema considera:
+
+- **Distribución por país**: Cada operador recibe uno o más países desde `LP_TLMKT`
+- **Orden por prioridad**: Los usuarios se asignan de mayor a menor prioridad (`ULTRA-1`, `ULTRA-2`, `ALTA-1`, ...)
+- **Completar con fallback**: Países de respaldo opcionales pueden completar cuotas incompletas cuando un país se queda sin usuarios
+- **Exclusión de usuarios contactados**: Excluye usuarios contactados desde `days_ago_to_discard` hacia ayer según configuración
+- **Comportamiento controlado por configuración**: La asignación y el filtrado se controlan desde Google Sheets
+
+## Referencias Operativas
+
+- **Spreadsheet de configuración**: [Daily_Assignment_Configuration](https://docs.google.com/spreadsheets/d/1h7FemF3zjIMCjTwo4DPKrNa-5eE-seV5nAW6tNrdPhU/edit?usp=sharing)
+  - Hoja 0 (parameters): configuración de asignación por campaña
+  - Hoja 1 (segments_to_consult): segmentos a consultar
+  - Hoja 2 (parameters_v2): configuración de asignación por país
+- **Looker Studio**: [Dashboard de asignación de telemarketing](https://datastudio.google.com/reporting/08c9ba40-b514-4715-98d1-d8b22a7587a0/page/p_q0dsmy25zd/edit)
+  - Página 1: asignación diaria por operador, ordenada por operador y prioridad para que al descargarse aparezcan primero los usuarios de mayor prioridad
+  - Página 2: data diaria disponible por país y prioridad
 
 ## Estructura del Proyecto
 
@@ -47,38 +60,34 @@ class Config:
     - float: Números decimales (porcentajes)  
     - str: Cadenas de texto
     - list(str): Listas de strings separadas por comas
+    - bool: Valores booleanos (`TRUE` / `FALSE`, `1` / `0`, `yes` / `no`)
     """
 ```
 
 **Parámetros principales:**
-- `days_ago_to_discard`: Días hacia atrás para excluir usuarios contactados por telemarketing o email marketing (ej: 7)
+  - `days_ago_to_discard`: Días hacia atrás para excluir usuarios contactados por telemarketing o email marketing. La ventana de descarte va desde esta fecha hasta ayer.
+  - `exclude_email_mkt_users`: Indica si se incluye el historial de email marketing en el descarte (`TRUE` / `FALSE`)
 - `users_to_assign_per_operator`: Cantidad base de usuarios por operador (ej: 100)
-- `currencies_to_filter`: Lista de monedas a excluir en la asignación (ej: ['USD', 'EUR', 'BRL'])
-- `priority_currencies`: Monedas de alta prioridad para asignación temprana (ej: ['USD', 'EUR'])
-- `max_priority_currencies_percent`: Porcentaje máximo de asignación para monedas prioritarias (ej: 0.4 = 40%)
-- `small_currencies_to_limit`: Monedas pequeñas con porcentaje límite de asignación conjunto (ej: ['JPY', 'CAD'])
-- `max_small_currencies_percent`: Porcentaje máximo total para monedas pequeñas (ej: 0.1 = 10%)
-- `big_currencies_to_limit`: Monedas grandes a asignar con porcentaje límite dividido (ej: ['BRL', 'CLP'])
-- `max_big_currencies_percent`: Porcentaje máximo de asignación para monedas grandes (ej: 0.3 = 30%)
-- `relevant_currencies`: Monedas relevantes sin límite específico (ej: ['USD', 'EUR', 'BRL'])
-- `extra_users_campaign`: Campañas adicionales para completar asignaciones (ej: ['non_depositors'])
+  - `currencies_to_filter`: Lista de monedas a excluir en la extracción
+  - `campaigns_to_filter`: Lista de campañas a excluir en la extracción
+  - `extra_users_country`: Países de respaldo opcionales para completar cuotas incompletas
 
-### Sistema de Porcentajes por Campañas
+  ### Distribución por País del Operador
 
-El sistema utiliza un algoritmo de distribución proporcional basado en el número de campañas asignadas a cada operador:
+  El sistema utiliza un split proporcional basado en la cantidad de países asignados a cada operador:
 
 ```python
 percentages = {
-    1: [1.0],           # 100% para operadores con 1 campaña
-    2: [0.7, 0.3],      # 70% y 30% para operadores con 2 campañas  
-    3: [0.5, 0.3, 0.2]  # 50%, 30% y 20% para operadores con 3 campañas
+  1: [1.0],           # 100% para operadores con 1 país
+  2: [0.7, 0.3],      # 70% y 30% para operadores con 2 países  
+  3: [0.5, 0.3, 0.2]  # 50%, 30% y 20% para operadores con 3 países
 }
 ```
 
 **Lógica de asignación:**
-- **1 campaña**: El operador recibe el 100% de sus usuarios asignados en esa campaña
-- **2 campañas**: La campaña principal recibe 70%, la secundaria 30%
-- **3 campañas**: Distribución 50%-30%-20% en orden de prioridad
+- **1 país**: El operador recibe el 100% de su cuota en ese país
+- **2 países**: El primer país recibe 70%, el segundo 30%
+- **3 países**: Distribución 50%-30%-20% en el orden configurado
 
 **Ejemplo práctico:**
 Si un operador debe recibir 100 usuarios y maneja 3 campañas:
@@ -184,33 +193,69 @@ gcloud run deploy daily-assignment-tlmkt \
 ### 3. **Transformación y Asignación (Transform)**
 - **Filtrado de usuarios**: Exclusión de usuarios contactados recientemente por telemarketing o email marketing
 - **Normalización de campañas**: Conversión entre códigos internos y nombres en español
-- **Creación de DataFrames por campaña**: Organización de usuarios disponibles
-- **Algoritmo de asignación en 4 fases**:
-  1. **Monedas prioritarias** (con límite porcentual dividido)
-  2. **Monedas pequeñas** (con límite porcentual total)
-  3. **Monedas grandes** (con límite porcentual dividido)
-  4. **Monedas relevantes** (sin límite, hasta completar)
-- **Completación de asignaciones**: Uso de usuarios extra de otras campañas
+- **Creación de DataFrames por campaña**: Organización de usuarios disponibles para métricas y reportes
+- **Asignación por cuota de país**: Los operadores reciben cuotas por país desde `LP_TLMKT`
+- **Asignación 1 a 1**: Los usuarios se asignan uno por uno por operador para mantener equilibrio
+- **Prioridad primero**: Los usuarios de mayor prioridad se asignan primero dentro de cada país
+- **Países de fallback**: `extra_users_country` puede completar cuotas incompletas si está configurado
 
 ### 4. **Carga de Datos (Load)**
 - **Archivo local**: Excel con asignaciones del día
 - **BigQuery**: Tabla de asignaciones históricas
 - **Normalización final**: Conversión de códigos a nombres en español
 
+### Tablas de BigQuery
+
+#### `tlmkt_DailyAssignment`
+
+Esquema actual usado por el cargador:
+
+| campo | tipo |
+|-------|------|
+| assignment_date | DATETIME |
+| operator | STRING |
+| campaign_name | STRING |
+| user_id | INTEGER |
+| username | STRING |
+| firstLast_name | STRING |
+| phone | STRING |
+| level | INTEGER |
+| register_currency | STRING |
+| last_activity | DATETIME |
+| campaign_details | STRING |
+| priority | STRING |
+
+#### `tlmkt_AssignmentMetrics`
+
+Esquema actual usado por el cargador:
+
+| campo | tipo |
+|-------|------|
+| assignment_date | DATETIME |
+| country | STRING |
+| priority | STRING |
+| campaign | STRING |
+| available_users | INTEGER |
+| assigned_users | INTEGER |
+| unassigned_users | INTEGER |
+
 ## Archivos de Configuración
 
 ### Google Sheets requeridos:
 1. **Daily_Assignment_Configuration** (Hoja 0): Parámetros del sistema
 2. **Daily_Assignment_Configuration** (Hoja 1): Tablas de segmentos
-3. **LP_TLMKT**: Lista de operadores activos
+3. **Daily_Assignment_Configuration** (Hoja 2): Configuración de asignación por país
+4. **LP_TLMKT**: Lista de operadores activos
 
 ### Estructura de configuración:
 | variable | value | type |
 |----------|-------|------|
 | days_ago_to_discard | 7 | int |
+| exclude_email_mkt_users | FALSE | bool |
 | users_to_assign_per_operator | 100 | int |
-| priority_currencies | USD,EUR | list(str) |
-| max_priority_currencies_percent | 0.4 | float |
+| currencies_to_filter | BOB | list(str) |
+| campaigns_to_filter | reactivation | list(str) |
+| extra_users_country | VES | list(str) |
 
 ## Mantenimiento y Administración
 
@@ -224,15 +269,18 @@ Editar Google Sheet 'LP_TLMKT':
 
 ### Modificar Parámetros del Sistema
 Editar Google Sheet 'Daily_Assignment_Configuration':
-- Cambiar porcentajes de monedas
+- Cambiar monedas y campañas excluidas
 - Ajustar días de exclusión
 - Modificar cantidad de usuarios por operador
-- Agregar nuevas monedas a listas
+- Activar o desactivar la exclusión de email marketing
+- Definir países de fallback para completar cuotas incompletas
 
 ### Troubleshooting Común
 - **Error de credenciales**: Verificar `gcloud auth list`
 - **Datos faltantes**: Revisar Google Sheets de configuración
-- **Asignaciones desbalanceadas**: Ajustar porcentajes en configuración
+- **Asignaciones desbalanceadas**: Revisar el mapeo de países en LP, los países fallback y la distribución por prioridad
+- **Desfase de esquema**: Verificar que las tablas de BQ incluyan `country` y `priority` en `tlmkt_AssignmentMetrics`
+- **No carga en BQ**: Confirmar que `load_data=True` en `main.py`
 - **Tablas no encontradas**: Verificar nombres de tablas en BigQuery
 
 ## Ejemplos de Salida
@@ -244,13 +292,14 @@ Editar Google Sheet 'Daily_Assignment_Configuration':
  tlmkt_Third_Depositors
 ⚠️  Table tlmkt_Active_Casino does not exist, skipping to next campaign
 Data extracted successfully
-Discarding users contacted since 2025-12-28
+Discarding users contacted from 2025-12-28 to 2025-12-31
 Available users for assignment: 15561
+Available users by currency (after discarding contacted users):
+  • VES: 9440 users
+  • CLP: 1877 users
+  • USD: 1699 users
 Creating assignment dictionary...
-Assigning Priority Currencies...
-Assigning Small Currencies...
-Assigning Big Currencies...
-Assigning Relevant Currencies...
+Assigning users by country with global priority order...
 User assignment process completed successfully.
 Loading data to BigQuery...
 Table mi-casino.dm_telemarketing.tlmkt_DailyAssignment has data for today. No new data will be appended.

@@ -1,5 +1,19 @@
 """Config management for daily assignment system."""
 
+
+def _parse_bool(value):
+    """Parse common boolean string/int representations."""
+    if isinstance(value, bool):
+        return value
+
+    text = str(value).strip().lower()
+    if text in ('true', '1', 'yes', 'y', 'si', 's'):
+        return True
+    if text in ('false', '0', 'no', 'n'):
+        return False
+
+    raise ValueError(f"Cannot parse bool value: {value}")
+
 class Config:
     """Manages configuration parameters from DataFrame."""
     
@@ -22,7 +36,13 @@ class Config:
             elif var_type == 'str':
                 setattr(self, var_name, str(var_value))
             elif var_type == 'list(str)':
-                setattr(self, var_name, var_value.split(', '))
+                if var_value is None or str(var_value).strip() == '':
+                    parsed_list = []
+                else:
+                    parsed_list = [item.strip() for item in str(var_value).split(',') if item.strip()]
+                setattr(self, var_name, parsed_list)
+            elif var_type == 'bool':
+                setattr(self, var_name, _parse_bool(var_value))
             else:
                 raise ValueError(f"Unknown type: {var_type}")
     

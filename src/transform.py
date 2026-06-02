@@ -329,6 +329,100 @@ def create_campaign_dataframes(available_users):
     return campaign_dfs
 
 
+def assign_users_by_country(available_users, assignment_dict, extra_users_country=None):
+    """
+    Assign users equitably by country, preserving global priority order within each country.
+    If users from a target country are exhausted, fills using countries listed in
+    extra_users_country (in the same order).
+
+    Args:
+        available_users (pd.DataFrame): DataFrame with available users.
+            Must contain: 'register_currency', 'campaign_name', 'priority'.
+        assignment_dict (dict): Dictionary with countries as keys and operator quotas as values.
+            Example:
+            {
+                'VES': [{'operator': 'op_1', 'users_to_assign': 130}, ...],
+                ...
+            }
+        extra_users_country (list[str], optional): Fallback countries used to complete
+            assignments when target-country users are not available.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame]: (assigned_users_df, remaining_users_df)
+    """
+    np.random.seed(42)
+
+    assigned_users_list = []
+    if extra_users_country is None:
+        extra_users_country = []
+
+    # Global randomized pool to break ties, then sorted by priority.
+    # We will always pick first match to preserve priority inside each country filter.
+    available_pool = available_users.sample(frac=1, random_state=42).reset_index(drop=True)
+    available_pool = sort_by_priority(available_pool)
+
+    for country, operators_info in assignment_dict.items():
+        if not operators_info:
+            continue
+
+        operator_assignments = {op_info['operator']: 0 for op_info in operators_info}
+        operator_index = 0
+
+        while True:
+            current_op_info = operators_info[operator_index]
+            operator = current_op_info['operator']
+            users_to_assign = current_op_info['users_to_assign']
+
+            remaining_limit = users_to_assign - operator_assignments[operator]
+            if remaining_limit <= 0:
+                operator_index = (operator_index + 1) % len(operators_info)
+                if operator_index == 0 and all(
+                    operator_assignments[op_info['operator']] >= op_info['users_to_assign']
+                    for op_info in operators_info
+                ):
+                    break
+                continue
+
+            # 1) Try target country first
+            target_mask = available_pool['register_currency'] == country
+            if target_mask.any():
+                candidate_idx = available_pool[target_mask].index[0]
+            else:
+                # 2) Fallback countries in configured priority order
+                candidate_idx = None
+                for fallback_country in extra_users_country:
+                    fallback_mask = available_pool['register_currency'] == fallback_country
+                    if fallback_mask.any():
+                        candidate_idx = available_pool[fallback_mask].index[0]
+                        break
+
+                if candidate_idx is None:
+                    # No candidates left for this target-country quota
+                    break
+
+            assigned = available_pool.loc[[candidate_idx]].copy()
+            assigned['campaign'] = assigned['campaign_name']
+            assigned['operator'] = operator
+            assigned_users_list.append(assigned)
+
+            operator_assignments[operator] += 1
+            available_pool = available_pool.drop(index=candidate_idx)
+            operator_index = (operator_index + 1) % len(operators_info)
+
+    if assigned_users_list:
+        assigned_users_df = pd.concat(assigned_users_list, ignore_index=True)
+    else:
+        assigned_users_df = available_users.head(0).copy()
+        assigned_users_df['campaign'] = pd.Series(dtype='object')
+        assigned_users_df['operator'] = pd.Series(dtype='object')
+
+    remaining_users_df = available_pool.copy()
+    if not remaining_users_df.empty:
+        remaining_users_df['campaign'] = remaining_users_df['campaign_name']
+
+    return assigned_users_df, remaining_users_df
+
+
 def calculate_remaining_assignments_dict(assigned_users_df, assignment_dict):
     """
     Calculates how many users each operator still needs to be assigned in each campaign and returns a dictionary.
@@ -760,47 +854,69 @@ def complete_assignments(remaining_users_df, remaining_assignments_dict, extra_u
     return assigned_users_df, available_users
 
 
-def create_assignment_metrics(campaign_dfs, assigned_users, assignment_date):
+def create_assignment_metrics(available_users, assigned_users, assignment_date):
     """
-    Creates a DataFrame with daily metrics showing available and assigned users per campaign.
+    Creates a DataFrame with daily metrics showing available and assigned users per
+    priority, country, and campaign.
     
     Args:
-        campaign_dfs (dict): Dictionary with campaign names as keys and DataFrames with available users as values
-        assigned_users (pd.DataFrame): DataFrame with all assigned users containing 'campaign_name' column
+        available_users (pd.DataFrame): DataFrame with all available users before assignment.
+            Must contain 'priority', 'register_currency', and 'campaign_name' columns.
+        assigned_users (pd.DataFrame): DataFrame with all assigned users.
+            Must contain 'priority', 'register_currency', and 'campaign_name' columns.
         assignment_date (str): Date of the assignment in 'YYYYMMDD' format
     
     Returns:
         pd.DataFrame: DataFrame with columns:
             - assignment_date: Date of the assignment
+            - priority: Priority bucket
+            - country: Country code (register_currency)
             - campaign: Campaign name
             - available_users: Number of users available for assignment
             - assigned_users: Number of users actually assigned
             - unassigned_users: Number of users that were available but not assigned
     """
-    metrics_list = []
-    
-    # Create metrics for each campaign
-    for campaign, df in campaign_dfs.items():
-        # Count available users for this campaign
-        available_count = len(df)
-        
-        # Count assigned users for this campaign
-        assigned_count = len(assigned_users[assigned_users['campaign_name'] == campaign])
-        
-        # Calculate unassigned users (leftover)
-        unassigned_count = available_count - assigned_count
-        
-        metrics_list.append({
-            'assignment_date': assignment_date,
-            'campaign': campaign,
-            'available_users': available_count,
-            'assigned_users': assigned_count,
-            'unassigned_users': unassigned_count
-        })
-    
-    # Create DataFrame
-    metrics_df = pd.DataFrame(metrics_list)
-    
+    # Available users by country and campaign
+    available_metrics = (
+        available_users
+        .groupby(['priority', 'register_currency', 'campaign_name'], dropna=False)
+        .size()
+        .reset_index(name='available_users')
+    )
+
+    # Assigned users by country and campaign
+    assigned_metrics = (
+        assigned_users
+        .groupby(['priority', 'register_currency', 'campaign_name'], dropna=False)
+        .size()
+        .reset_index(name='assigned_users')
+    )
+
+    # Merge both metrics and fill missing values
+    metrics_df = available_metrics.merge(
+        assigned_metrics,
+        on=['priority', 'register_currency', 'campaign_name'],
+        how='outer'
+    )
+    metrics_df['available_users'] = metrics_df['available_users'].fillna(0).astype(int)
+    metrics_df['assigned_users'] = metrics_df['assigned_users'].fillna(0).astype(int)
+    metrics_df['unassigned_users'] = metrics_df['available_users'] - metrics_df['assigned_users']
+
+    # Rename and order columns as requested (country after assignment_date)
+    metrics_df = metrics_df.rename(columns={
+        'register_currency': 'country',
+        'campaign_name': 'campaign'
+    })
+
+    metrics_df.insert(0, 'assignment_date', assignment_date)
+    metrics_df = metrics_df[['assignment_date', 'country', 'priority', 'campaign', 'available_users', 'assigned_users', 'unassigned_users']]
+    # Sort by country, then real priority order (ULTRA-1, ULTRA-2, ALTA-1, ...), then campaign.
+    metrics_df = metrics_df.assign(_priority_key=metrics_df['priority'].apply(create_priority_sort_key))
+    metrics_df['_priority_key'] = metrics_df['_priority_key'].apply(
+        lambda key: key if key is not None else (99, 99)
+    )
+    metrics_df = metrics_df.sort_values(['country', '_priority_key', 'campaign']).drop(columns=['_priority_key']).reset_index(drop=True)
+
     return metrics_df
 
 
