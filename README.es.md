@@ -10,7 +10,8 @@ El sistema considera:
 - **Distribución por país**: Cada operador recibe uno o más países desde `LP_TLMKT`
 - **Orden por prioridad**: Los usuarios se asignan de mayor a menor prioridad (`ULTRA-1`, `ULTRA-2`, `ALTA-1`, ...)
 - **Completar con fallback**: Países de respaldo opcionales pueden completar cuotas incompletas cuando un país se queda sin usuarios
-- **Exclusión de usuarios contactados**: Excluye usuarios contactados desde `days_ago_to_discard` hacia ayer según configuración
+- **Exclusión de usuarios contactados**: Excluye usuarios contactados según ventanas de descarte configurables — globales o por campaña — desde `days_ago_to_discard` hasta ayer
+- **Filtrado por moneda y campaña**: Permite apagar una campaña en un país específico mediante `campaigns_to_filter_by_currency`
 - **Comportamiento controlado por configuración**: La asignación y el filtrado se controlan desde Google Sheets
 
 ## Referencias Operativas
@@ -61,15 +62,17 @@ class Config:
     - str: Cadenas de texto
     - list(str): Listas de strings separadas por comas
     - bool: Valores booleanos (`TRUE` / `FALSE`, `1` / `0`, `yes` / `no`)
+    - dict(str,list(str)): Diccionario de moneda → lista de campañas (formato: `PEN:camp1,camp2|BOB:camp1`)
     """
 ```
 
 **Parámetros principales:**
-  - `days_ago_to_discard`: Días hacia atrás para excluir usuarios contactados por telemarketing o email marketing. La ventana de descarte va desde esta fecha hasta ayer.
+  - `days_ago_to_discard`: Ventana de descarte global en días. Actúa como fallback para campañas que no tengan valor propio en `segments_to_consult`. También determina cuántos días atrás se descarga el historial si no hay campañas con ventana mayor.
   - `exclude_email_mkt_users`: Indica si se incluye el historial de email marketing en el descarte (`TRUE` / `FALSE`)
 - `users_to_assign_per_operator`: Cantidad base de usuarios por operador (ej: 100)
   - `currencies_to_filter`: Lista de monedas a excluir en la extracción
-  - `campaigns_to_filter`: Lista de campañas a excluir en la extracción
+  - `campaigns_to_filter`: Lista de campañas a excluir globalmente (todos los países)
+  - `campaigns_to_filter_by_currency`: Campañas a excluir por moneda específica. Permite apagar una campaña solo en un país sin afectar los demás. Formato: `PEN:sport_events,reactivation|BOB:sport_events`. Si la celda está vacía no se aplica ningún filtro.
   - `extra_users_country`: Países de respaldo opcionales para completar cuotas incompletas
 
   ### Distribución por País del Operador
@@ -191,7 +194,8 @@ gcloud run deploy daily-assignment-tlmkt \
 - **Configuración de campañas**: Parámetros dinámicos del sistema
 
 ### 3. **Transformación y Asignación (Transform)**
-- **Filtrado de usuarios**: Exclusión de usuarios contactados recientemente por telemarketing o email marketing
+- **Filtrado de usuarios**: Exclusión de usuarios contactados recientemente por telemarketing o email marketing, con ventana de descarte configurable por campaña
+- **Filtrado por moneda y campaña**: Exclusión de campañas específicas para monedas/países concretos (`campaigns_to_filter_by_currency`)
 - **Normalización de campañas**: Conversión entre códigos internos y nombres en español
 - **Creación de DataFrames por campaña**: Organización de usuarios disponibles para métricas y reportes
 - **Asignación por cuota de país**: Los operadores reciben cuotas por país desde `LP_TLMKT`
@@ -255,7 +259,16 @@ Esquema actual usado por el cargador:
 | users_to_assign_per_operator | 100 | int |
 | currencies_to_filter | BOB | list(str) |
 | campaigns_to_filter | reactivation | list(str) |
+| campaigns_to_filter_by_currency | PEN:sport_events\|BOB:sport_events | dict(str,list(str)) |
 | extra_users_country | VES | list(str) |
+
+### Estructura de segments_to_consult:
+| table_name | control_group_percent | description | campaign_label | days_ago_to_discard |
+|---|---|---|---|---|
+| tlmkt_Sport_Events | 0 | Eventos Deportivos | sport_events | 7 |
+| tlmkt_Non_Depositors | 0 | No Depositantes | non_depositors | 21 |
+
+`days_ago_to_discard` en esta hoja define la ventana de descarte por campaña. Si se deja vacío, usa el valor global del parámetro homónimo en `parameters_v2`.
 
 ## Mantenimiento y Administración
 
@@ -287,23 +300,14 @@ Editar Google Sheet 'Daily_Assignment_Configuration':
 
 ### Logs de Ejecución
 ```
- tlmkt_Non_Depositors
- tlmkt_Second_Depositors
- tlmkt_Third_Depositors
-⚠️  Table tlmkt_Active_Casino does not exist, skipping to next campaign
-Data extracted successfully
-Discarding users contacted from 2025-12-28 to 2025-12-31
+History fetch window: 21 days back (2026-06-19)
+Per-campaign discard windows: {'sport_events': 7, 'non_depositors': 21, 'reactivation': 14}
+Filtering campaigns by currency:
+  - PEN: ['sport_events']
+  [PEN] Removed 342 users from campaigns ['sport_events']
+Users after currency-campaign filter: 15219
+Discarding previously contacted users (per-campaign windows, up to 2026-07-09)
 Available users for assignment: 15561
-Available users by currency (after discarding contacted users):
-  • VES: 9440 users
-  • CLP: 1877 users
-  • USD: 1699 users
-Creating assignment dictionary...
-Assigning users by country with global priority order...
-User assignment process completed successfully.
-Loading data to BigQuery...
-Table mi-casino.dm_telemarketing.tlmkt_DailyAssignment has data for today. No new data will be appended.
-Daily assignment process finalized successfully.
 ```
 
 ## Licencia

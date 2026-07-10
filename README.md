@@ -10,7 +10,8 @@ The system now considers:
 - **Country-based distribution**: Operators are assigned one or more countries from `LP_TLMKT`
 - **Priority ordering**: Users are assigned from highest to lowest priority (`ULTRA-1`, `ULTRA-2`, `ALTA-1`, ...)
 - **Fallback completion**: Optional fallback countries can fill incomplete quotas when a country runs out of users
-- **Contacted user exclusion**: Excludes users contacted from `days_ago_to_discard` back to yesterday based on configuration
+- **Contacted user exclusion**: Excludes users contacted within configurable discard windows — global or per campaign — from `days_ago_to_discard` back to yesterday
+- **Currency and campaign filtering**: Allows disabling a campaign for a specific country via `campaigns_to_filter_by_currency`
 - **Config-driven behavior**: Assignment and filtering are controlled by Google Sheets
 
 ## Operational References
@@ -59,16 +60,16 @@ class Config:
     - float: Decimal numbers (percentages)  
     - str: Text strings
     - list(str): Lists of strings separated by commas
-   - bool: Boolean values (`TRUE` / `FALSE`, `1` / `0`, `yes` / `no`)
-    """
+   - bool: Boolean values (`TRUE` / `FALSE`, `1` / `0`, `yes` / `no`)   - dict(str,list(str)): Dictionary of currency → list of campaigns (format: `PEN:camp1,camp2|BOB:camp1`)    """
 ```
 
 **Main parameters:**
-- `days_ago_to_discard`: Days back to exclude users contacted by telemarketing or email marketing. The discard window runs from this date up to yesterday.
+- `days_ago_to_discard`: Global discard window in days. Acts as fallback for campaigns without a specific value in `segments_to_consult`. Also determines how far back history is fetched from BigQuery if no campaign has a larger window.
 - `exclude_email_mkt_users`: Whether to include email marketing history in the discard window (`TRUE` / `FALSE`)
 - `users_to_assign_per_operator`: Base number of users per operator (e.g., 100)
 - `currencies_to_filter`: List of currencies to exclude in extraction
-- `campaigns_to_filter`: List of campaigns to exclude in extraction
+- `campaigns_to_filter`: List of campaigns to exclude globally (all countries)
+- `campaigns_to_filter_by_currency`: Campaigns to exclude per specific currency. Allows turning off a campaign in one country without affecting others. Format: `PEN:sport_events,reactivation|BOB:sport_events`. Empty cell = no filter applied.
 - `extra_users_country`: Optional fallback countries used to complete incomplete operator quotas
 
 ### Operator Country Split
@@ -190,7 +191,8 @@ gcloud run deploy daily-assignment-tlmkt \
 - **Campaign configuration**: Dynamic system parameters
 
 ### 3. **Transformation and Assignment (Transform)**
-- **User filtering**: Exclusion of users recently contacted by telemarketing or email marketing
+- **User filtering**: Exclusion of users recently contacted by telemarketing or email marketing, with configurable per-campaign discard windows
+- **Currency and campaign filtering**: Exclusion of specific campaigns for specific currencies/countries (`campaigns_to_filter_by_currency`)
 - **Campaign normalization**: Conversion between internal codes and Spanish names
 - **DataFrame creation per campaign**: Organization of available users for reporting and metrics
 - **Country-based quota assignment**: Operators receive quotas by country from `LP_TLMKT`
@@ -252,26 +254,14 @@ Total assigned users:        392
 The system generates detailed real-time logs:
 
 ```
-Extracting data to assign...
-Data extracted successfully
-Discarding users contacted from 2025-08-20 to 2025-08-31
-Available users for assignment: 15658
-
-Available users by currency (after discarding contacted users):
-   • VES: 9440 users
-   • CLP: 1877 users
-   • USD: 1699 users
-
-Creating assignment dictionary...
-Assignment Dictionary created successfully.
-
-Assigning users by country with global priority order...
-Assignment completed.
-
-Saving assignment to local file...
-Assignment saved to local file.
-Loading data to BigQuery...
-Data loaded to BigQuery successfully.
+History fetch window: 21 days back (2026-06-19)
+Per-campaign discard windows: {'sport_events': 7, 'non_depositors': 21, 'reactivation': 14}
+Filtering campaigns by currency:
+  - PEN: ['sport_events']
+  [PEN] Removed 342 users from campaigns ['sport_events']
+Users after currency-campaign filter: 15219
+Discarding previously contacted users (per-campaign windows, up to 2026-07-09)
+Available users for assignment: 15561
 ```
 
 ## Configuration Files
@@ -290,7 +280,16 @@ Data loaded to BigQuery successfully.
 | users_to_assign_per_operator | 100 | int |
 | currencies_to_filter | BOB | list(str) |
 | campaigns_to_filter | reactivation | list(str) |
+| campaigns_to_filter_by_currency | PEN:sport_events\|BOB:sport_events | dict(str,list(str)) |
 | extra_users_country | VES | list(str) |
+
+### Segments to consult structure:
+| table_name | control_group_percent | description | campaign_label | days_ago_to_discard |
+|---|---|---|---|---|
+| tlmkt_Sport_Events | 0 | Eventos Deportivos | sport_events | 7 |
+| tlmkt_Non_Depositors | 0 | No Depositantes | non_depositors | 21 |
+
+`days_ago_to_discard` in this sheet defines the per-campaign discard window. If left empty, the global value from `parameters_v2` is used as fallback.
 
 ## Maintenance and Administration
 
