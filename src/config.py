@@ -41,6 +41,25 @@ class Config:
                 else:
                     parsed_list = [item.strip() for item in str(var_value).split(',') if item.strip()]
                 setattr(self, var_name, parsed_list)
+            elif var_type == 'dict(str,list(str))':
+                # Format: "PEN:sport_events,reactivation|BOB:sport_events"
+                # Empty value -> empty dict
+                parsed_dict = {}
+                if var_value is not None and str(var_value).strip():
+                    for entry in str(var_value).split('|'):
+                        entry = entry.strip()
+                        if not entry:
+                            continue
+                        if ':' not in entry:
+                            raise ValueError(
+                                f"Invalid dict entry '{entry}' for variable '{var_name}'. "
+                                "Expected format: 'KEY:val1,val2'"
+                            )
+                        key, _, values_str = entry.partition(':')
+                        key = key.strip()
+                        values = [v.strip() for v in values_str.split(',') if v.strip()]
+                        parsed_dict[key] = values
+                setattr(self, var_name, parsed_dict)
             elif var_type == 'bool':
                 setattr(self, var_name, _parse_bool(var_value))
             else:

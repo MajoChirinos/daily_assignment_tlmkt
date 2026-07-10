@@ -9,13 +9,15 @@ from google.auth import default
 from src.extract import read_google_sheet, get_data, get_data_hist
 from src.config import Config
 from src.transform import (
+    normalize_country_to_currency,
     normalize_campaign_to_code,
     normalize_campaign_to_display,
     create_campaign_dataframes,
     create_priority_sort_key,
     assign_users_by_country,
     count_users_per_operator,
-    create_assignment_metrics
+    create_assignment_metrics,
+    build_discard_from_hist,
 )
 from src.load import CreateAndLoad_BQ
 
@@ -24,22 +26,6 @@ def run_daily_assignment(request) -> str:
     try:
         creds, project = default()
 
-        # Normalize LP country/country-code values to register_currency codes used by users data.
-        country_to_currency = {
-            'VE': 'VES', 'VES': 'VES', 'VENEZUELA': 'VES',
-            'CL': 'CLP', 'CLP': 'CLP', 'CHILE': 'CLP',
-            'PE': 'PEN', 'PEN': 'PEN', 'PERU': 'PEN', 'PERU\u0301': 'PEN',
-            'EC': 'USD', 'ECUADOR': 'USD',
-            'US': 'USD', 'USA': 'USD', 'USD': 'USD',
-            'GT': 'GTQ', 'GTQ': 'GTQ', 'GUATEMALA': 'GTQ',
-            'HN': 'HNL', 'HNL': 'HNL', 'HONDURAS': 'HNL',
-            'MX': 'MXN', 'MXN': 'MXN', 'MEXICO': 'MXN', 'ME\u0301XICO': 'MXN',
-            'CR': 'CRC', 'CRC': 'CRC', 'COSTARICA': 'CRC', 'COSTA RICA': 'CRC'
-        }
-
-        def normalize_country_to_currency(value):
-            text = str(value).strip().upper()
-            return country_to_currency.get(text, text)
 
         # ========== ASSIGNMENT CONFIGURATION ==========
         # Read configuration file
@@ -62,6 +48,7 @@ def run_daily_assignment(request) -> str:
         users_to_assign_per_operator = config.users_to_assign_per_operator
         currencies_to_filter = config.currencies_to_filter
         campaigns_to_filter = config.campaigns_to_filter
+        campaigns_to_filter_by_currency = config.campaigns_to_filter_by_currency
         extra_users_country = getattr(config, 'extra_users_country', [])
 
         #print(f"exclude_email_mkt_users: {exclude_email_mkt_users}")
@@ -71,12 +58,34 @@ def run_daily_assignment(request) -> str:
         today_midnight = datetime(today_dt.year, today_dt.month, today_dt.day)
         today = datetime.strftime(today_midnight, '%Y-%m-%d').replace('-', '')
         yesterday_str = datetime.strftime(today_midnight - timedelta(days=1), '%Y-%m-%d')
-
-        days_ago_to_discard = datetime.now() - timedelta(days=days_ago_to_discard)
-        days_ago_to_discard = datetime(days_ago_to_discard.year, days_ago_to_discard.month, days_ago_to_discard.day)
-        days_ago_to_discard = datetime.strftime(days_ago_to_discard, '%Y-%m-%d')
+        # days_ago_to_discard stays as int here; fetch_cutoff_str is computed after reading segments_tables
 
         # ========== DATA PREPARATION ==========
+        # Segment tables to assign (read early to build per-campaign discard windows)
+        try:
+            segments_tables = read_google_sheet('Daily_Assignment_Configuration', 1)
+        except Exception as error:
+            print(f"Error reading segment tables from Google Sheets: {error}")
+            return f"Error: Failed to read segment tables - {error}"
+
+        campaigns_to_assign = segments_tables['table_name'].tolist()
+
+        # Build per-campaign discard window: fallback to global days_ago_to_discard
+        campaign_discard_map = {}
+        for _, seg_row in segments_tables.iterrows():
+            label = seg_row['campaign_label']
+            val = seg_row.get('days_ago_to_discard', '')
+            if pd.notna(val) and str(val).strip():
+                campaign_discard_map[label] = int(float(val))
+            else:
+                campaign_discard_map[label] = days_ago_to_discard
+
+        max_discard_days = max([days_ago_to_discard] + list(campaign_discard_map.values()))
+        fetch_cutoff_dt = today_midnight - timedelta(days=max_discard_days)
+        fetch_cutoff_str = datetime.strftime(fetch_cutoff_dt, '%Y-%m-%d')
+        print(f"History fetch window: {max_discard_days} days back ({fetch_cutoff_str})")
+        print(f"Per-campaign discard windows: { {k: v for k, v in campaign_discard_map.items()} }")
+
         # LP-TLMKT processing
         try:
             lp = read_google_sheet('LP_TLMKT', 0)
@@ -123,45 +132,39 @@ def run_daily_assignment(request) -> str:
 
         # Historical assignment users from telemarketing
         try:
-            daily_assigment_hist = get_data_hist('tlmkt_DailyAssignment', days_ago_to_discard, credentials=creds)
+            daily_assigment_hist = get_data_hist('tlmkt_DailyAssignment', fetch_cutoff_str, credentials=creds)
         except Exception as error:
             print(f"Error getting historical telemarketing data from BigQuery: {error}")
             return f"Error: Failed to get historical telemarketing data - {error}"
-        
+
         print(f"Telemarketing historical users loaded: {daily_assigment_hist.shape[0]}")
         daily_assigment_hist['campaign_name'] = daily_assigment_hist['campaign_name'].apply(normalize_campaign_to_code)
         # Exclude today's assignments from discard; keep yesterday and older.
         daily_assigment_hist = daily_assigment_hist[daily_assigment_hist['assignment_date'] < today_midnight]
 
-        # Users to discard (telemarketing + optional email marketing)
-        tlmkt_users_to_discard = daily_assigment_hist[['user_id', 'campaign_name']]
-        users_to_discard = tlmkt_users_to_discard.copy()
+        # Build users_to_discard per campaign using each campaign's specific lookback window
+        users_to_discard = build_discard_from_hist(
+            daily_assigment_hist, campaign_discard_map, today_midnight, days_ago_to_discard
+        )
 
         if exclude_email_mkt_users:
             try:
-                email_mkt_hist = get_data_hist('email_mkt_DailyAssignment', days_ago_to_discard, credentials=creds)
+                email_mkt_hist = get_data_hist('email_mkt_DailyAssignment', fetch_cutoff_str, credentials=creds)
                 print(f"Email marketing historical users loaded: {email_mkt_hist.shape[0]}")
                 if not email_mkt_hist.empty:
                     email_mkt_hist['campaign_name'] = email_mkt_hist['campaign_name'].apply(normalize_campaign_to_code)
                     # Exclude today's assignments from discard; keep yesterday and older.
                     email_mkt_hist = email_mkt_hist[email_mkt_hist['assignment_date'] < today_midnight]
-                    email_users_to_discard = email_mkt_hist[['user_id', 'campaign_name']]
-                    users_to_discard = pd.concat([users_to_discard, email_users_to_discard], ignore_index=True)
+                    email_users_to_discard = build_discard_from_hist(
+                        email_mkt_hist, campaign_discard_map, today_midnight, days_ago_to_discard
+                    )
+                    users_to_discard = pd.concat([users_to_discard, email_users_to_discard], ignore_index=True).drop_duplicates()
             except Exception as error:
                 print(f"Warning: Could not load email marketing history, continuing with TLMKT only: {error}")
         else:
             print("Skipping email marketing historical load (exclude_email_mkt_users=False)")
 
         print(f"Total users to discard: {users_to_discard.shape[0]}")
-
-        # Segment tables to assign
-        try:
-            segments_tables = read_google_sheet('Daily_Assignment_Configuration', 1)
-        except Exception as error:
-            print(f"Error reading segment tables from Google Sheets: {error}")
-            return f"Error: Failed to read segment tables - {error}"
-        
-        campaigns_to_assign = segments_tables['table_name'].tolist()
 
         # Data extraction to assign
         print("Extracting data to assign...")
@@ -179,8 +182,22 @@ def run_daily_assignment(request) -> str:
             available_users = available_users[~available_users['campaign_name'].isin(campaigns_to_filter)]
             print(f"Users after campaign filter: {available_users.shape[0]}")
 
-        # Remove users contacted 'days_ago_to_discard' ago (users_to_discard)
-        print(f"Discarding users contacted from {days_ago_to_discard} to {yesterday_str}")
+        if campaigns_to_filter_by_currency:
+            print("Filtering campaigns by currency:")
+            for currency, campaigns in campaigns_to_filter_by_currency.items():
+                print(f"  - {currency}: {campaigns}")
+            for currency, campaigns in campaigns_to_filter_by_currency.items():
+                mask = (
+                    (available_users['register_currency'] == currency) &
+                    (available_users['campaign_name'].isin(campaigns))
+                )
+                removed = mask.sum()
+                available_users = available_users[~mask]
+                print(f"  [{currency}] Removed {removed} users from campaigns {campaigns}")
+            print(f"Users after currency-campaign filter: {available_users.shape[0]}")
+
+        # Remove users contacted within each campaign's lookback window
+        print(f"Discarding previously contacted users (per-campaign windows, up to {yesterday_str})")
         available_users = available_users.merge(
             users_to_discard, 
             on=['user_id', 'campaign_name'], 

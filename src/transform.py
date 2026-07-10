@@ -2,7 +2,49 @@ import pandas as pd
 import numpy as np
 import re
 from collections import defaultdict
+from datetime import datetime, timedelta
 from typing import List, Dict
+
+
+# Country/currency code lookup used to normalize LP country values
+# to the register_currency codes present in user data.
+_COUNTRY_TO_CURRENCY = {
+    'VE': 'VES', 'VES': 'VES', 'VENEZUELA': 'VES',
+    'CL': 'CLP', 'CLP': 'CLP', 'CHILE': 'CLP',
+    'PE': 'PEN', 'PEN': 'PEN', 'PERU': 'PEN', 'PERÚ': 'PEN',
+    'EC': 'USD', 'ECUADOR': 'USD',
+    'US': 'USD', 'USA': 'USD', 'USD': 'USD',
+    'GT': 'GTQ', 'GTQ': 'GTQ', 'GUATEMALA': 'GTQ',
+    'HN': 'HNL', 'HNL': 'HNL', 'HONDURAS': 'HNL',
+    'MX': 'MXN', 'MXN': 'MXN', 'MEXICO': 'MXN', 'MÉXICO': 'MXN',
+    'CR': 'CRC', 'CRC': 'CRC', 'COSTARICA': 'CRC', 'COSTA RICA': 'CRC',
+}
+
+
+def normalize_country_to_currency(value: str) -> str:
+    """
+    Converts a country name, ISO-2 code, or currency code to the
+    register_currency code used in user data.
+
+    Falls back to the uppercased input if no mapping is found,
+    so unknown values pass through without raising.
+
+    Args:
+        value (str): Country name, ISO-2 code, or currency code (case-insensitive).
+
+    Returns:
+        str: Corresponding register_currency code (e.g. 'PEN', 'CLP').
+
+    Examples:
+        >>> normalize_country_to_currency('PE')
+        'PEN'
+        >>> normalize_country_to_currency('Chile')
+        'CLP'
+        >>> normalize_country_to_currency('XYZ')  # unknown → passthrough
+        'XYZ'
+    """
+    text = str(value).strip().upper()
+    return _COUNTRY_TO_CURRENCY.get(text, text)
 
 
 def normalize_campaign_to_code(campaign_str):
@@ -327,6 +369,59 @@ def create_campaign_dataframes(available_users):
         campaign_dfs[campaign] = campaign_df
     
     return campaign_dfs
+
+
+def build_discard_from_hist(
+    hist_df: pd.DataFrame,
+    campaign_discard_map: Dict[str, int],
+    today_midnight: datetime,
+    global_days_ago: int,
+) -> pd.DataFrame:
+    """
+    Builds the set of (user_id, campaign_name) pairs to discard from assignment,
+    applying a per-campaign lookback window defined in campaign_discard_map.
+
+    For each campaign in campaign_discard_map the function keeps only history
+    records within that campaign's window.  Any campaign present in hist_df but
+    NOT in campaign_discard_map falls back to the global_days_ago window.
+
+    Args:
+        hist_df (pd.DataFrame): Historical assignment records with at least
+            columns ['user_id', 'campaign_name', 'assignment_date'].
+            assignment_date must be a timezone-naive datetime column and must
+            already exclude today (assignment_date < today_midnight).
+        campaign_discard_map (Dict[str, int]): Mapping of campaign_label → days.
+            Built from the segments_to_consult sheet column days_ago_to_discard.
+        today_midnight (datetime): Start of today with no time component
+            (datetime(year, month, day)) used as the reference point for cutoffs.
+        global_days_ago (int): Fallback lookback in days for campaigns not
+            present in campaign_discard_map.
+
+    Returns:
+        pd.DataFrame: Deduplicated DataFrame with columns ['user_id', 'campaign_name']
+            representing users that must be excluded from today's assignment.
+    """
+    parts = []
+
+    # Per-campaign filtered slices
+    for campaign_label, days in campaign_discard_map.items():
+        cutoff = today_midnight - timedelta(days=days)
+        campaign_hist = hist_df[
+            (hist_df['campaign_name'] == campaign_label) &
+            (hist_df['assignment_date'] >= cutoff)
+        ][['user_id', 'campaign_name']]
+        parts.append(campaign_hist)
+
+    # Campaigns in the history that are not in the map → use global window
+    known_labels = set(campaign_discard_map.keys())
+    global_cutoff = today_midnight - timedelta(days=global_days_ago)
+    other_hist = hist_df[
+        (~hist_df['campaign_name'].isin(known_labels)) &
+        (hist_df['assignment_date'] >= global_cutoff)
+    ][['user_id', 'campaign_name']]
+    parts.append(other_hist)
+
+    return pd.concat(parts, ignore_index=True).drop_duplicates()
 
 
 def assign_users_by_country(available_users, assignment_dict, extra_users_country=None):
