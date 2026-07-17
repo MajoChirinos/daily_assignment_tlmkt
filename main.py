@@ -36,7 +36,11 @@ def run_daily_assignment(request) -> str:
             return f"Error: Failed to read configuration - {error}"
 
         # Create configuration object
-        config = Config(conf)
+        try:
+            config = Config(conf)
+        except Exception as error:
+            print(f"Error loading configuration parameters: {error}")
+            return f"Error: Failed to load configuration - {error}"
 
         # Variable declaration from Config class
         days_ago_to_discard = config.days_ago_to_discard
@@ -72,6 +76,7 @@ def run_daily_assignment(request) -> str:
 
         # Build per-campaign discard window: fallback to global days_ago_to_discard
         campaign_discard_map = {}
+        campaign_control_map = {}
         for _, seg_row in segments_tables.iterrows():
             label = seg_row['campaign_label']
             val = seg_row.get('days_ago_to_discard', '')
@@ -79,6 +84,12 @@ def run_daily_assignment(request) -> str:
                 campaign_discard_map[label] = int(float(val))
             else:
                 campaign_discard_map[label] = days_ago_to_discard
+
+            ctrl_val = seg_row.get('control_group_percent', '')
+            if pd.notna(ctrl_val) and str(ctrl_val).strip():
+                campaign_control_map[label] = float(ctrl_val)
+            else:
+                campaign_control_map[label] = 0.0
 
         max_discard_days = max([days_ago_to_discard] + list(campaign_discard_map.values()))
         fetch_cutoff_dt = today_midnight - timedelta(days=max_discard_days)
@@ -115,20 +126,22 @@ def run_daily_assignment(request) -> str:
             .unique()
             .tolist()
         )
-        lp['country'] = lp['country'].apply(
-            lambda countries: [
+        try:
+            lp['country'] = lp['country'].apply(
+                lambda countries: [
+                    normalize_country_to_currency(country)
+                    for country in countries
+                    if str(country).strip()
+                ]
+            )
+            extra_users_country = [
                 normalize_country_to_currency(country)
-                for country in countries
+                for country in extra_users_country
                 if str(country).strip()
             ]
-        )
-
-        # Normalize fallback countries from config to same currency code standard.
-        extra_users_country = [
-            normalize_country_to_currency(country)
-            for country in extra_users_country
-            if str(country).strip()
-        ]
+        except Exception as error:
+            print(f"Error normalizing country codes: {error}")
+            return f"Error: Failed to normalize country codes - {error}"
 
         # Historical assignment users from telemarketing
         try:
@@ -143,9 +156,13 @@ def run_daily_assignment(request) -> str:
         daily_assigment_hist = daily_assigment_hist[daily_assigment_hist['assignment_date'] < today_midnight]
 
         # Build users_to_discard per campaign using each campaign's specific lookback window
-        users_to_discard = build_discard_from_hist(
-            daily_assigment_hist, campaign_discard_map, today_midnight, days_ago_to_discard
-        )
+        try:
+            users_to_discard = build_discard_from_hist(
+                daily_assigment_hist, campaign_discard_map, today_midnight, days_ago_to_discard
+            )
+        except Exception as error:
+            print(f"Error building discard list from telemarketing history: {error}")
+            return f"Error: Failed to build discard list - {error}"
 
         if exclude_email_mkt_users:
             try:
@@ -208,6 +225,28 @@ def run_daily_assignment(request) -> str:
         available_users = available_users[available_users['_merge'] == 'left_only'].drop(columns=['_merge'])
 
         print(f"Available users for assignment: {available_users.shape[0]}")
+
+        # ========== CONTROL GROUP RESERVATION ==========
+        # Reserve a fixed percentage per campaign BEFORE assignment.
+        # Seed is date-based (YYYYMMDD) so re-running on the same day yields identical results.
+        control_seed = int(today)
+        active_control_campaigns = {k: v for k, v in campaign_control_map.items() if v > 0}
+        if active_control_campaigns:
+            print(f"\nReserving control groups (random seed={control_seed}):")
+            control_indices = []
+            for campaign_label, pct in active_control_campaigns.items():
+                campaign_pool = available_users[available_users['campaign_name'] == campaign_label]
+                n_control = int(len(campaign_pool) * pct)
+                if n_control > 0:
+                    reserved = campaign_pool.sample(n=n_control, random_state=control_seed)
+                    control_indices.extend(reserved.index.tolist())
+                    print(f"  • {campaign_label}: {n_control}/{len(campaign_pool)} users reserved as control ({pct:.0%})")
+                else:
+                    print(f"  • {campaign_label}: 0 users reserved (pool too small for {pct:.0%})")
+            available_users = available_users.drop(index=control_indices)
+            print(f"Available users after control group reservation: {available_users.shape[0]}")
+        else:
+            print("\nNo control groups configured — all available users eligible for assignment.")
 
         # Summary of available users by currency (after discarding contacted users)
         print("\nAvailable users by currency (after discarding contacted users):")
