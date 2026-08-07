@@ -224,6 +224,12 @@ def run_daily_assignment(request) -> str:
 
         available_users = available_users[available_users['_merge'] == 'left_only'].drop(columns=['_merge'])
 
+        before_dedup = available_users.shape[0]
+        available_users = available_users.drop_duplicates(subset=['user_id', 'campaign_name'])
+        dedup_removed = before_dedup - available_users.shape[0]
+        if dedup_removed > 0:
+            print(f"Duplicate (user_id, campaign_name) rows removed: {dedup_removed}")
+
         print(f"Available users for assignment: {available_users.shape[0]}")
 
         # ========== CONTROL GROUP RESERVATION ==========
@@ -519,7 +525,7 @@ def run_daily_assignment(request) -> str:
                              prefix='tlmkt_', 
                              deleted_if_exist=False, 
                              load_data=True, 
-                             delete_today=False)
+                             delete_today=True)
         except Exception as error:
             print(f"Error loading data to BigQuery: {error}")
             return f"Error: Failed to load data to BigQuery - {error}"
