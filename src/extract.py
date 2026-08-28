@@ -7,6 +7,32 @@ import os
 from typing import List
 import json
 
+
+def _priority_sort_key(priority_value):
+    """Build a sortable key where lower tuple means higher priority."""
+    if pd.isna(priority_value) or not priority_value:
+        return (99, 99)
+
+    priority_levels = {
+        'ULTRA': 1,
+        'ALTA': 2,
+        'MEDIA': 3,
+        'BAJA': 4,
+    }
+
+    try:
+        parts = str(priority_value).split('-')
+        if len(parts) == 2:
+            level = parts[0].strip().upper()
+            number = int(parts[1].strip())
+            level_rank = priority_levels.get(level)
+            if level_rank is not None:
+                return (level_rank, number)
+    except (ValueError, AttributeError):
+        pass
+
+    return (99, 99)
+
 def read_google_sheet(sheet, work_sheet):
     
 
@@ -57,6 +83,7 @@ def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], cr
             # Execute the query and fetch the data
             print(f"* {table_name}")
             df = pandas_gbq.read_gbq(query, project_id='mi-casino', use_bqstorage_api=True, credentials=credentials)
+            raw_count = len(df)
             
             # Check if the table is empty
             if df.empty:
@@ -66,7 +93,10 @@ def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], cr
             # Apply filters
             df = df[~df['register_currency'].isin(['CAD', 'ARS', 'BRL'])]
             df = df[df.level.isin([1, 2, 3])]
-            df.dropna(subset=['phone'], inplace=True)
+            df.dropna(subset=['phone', 'firstLast_name'], inplace=True)
+            df = df[df['firstLast_name'].astype(str).str.strip().ne('')]
+            df['source_table'] = table_name
+            print(f"  - Raw rows: {raw_count} | Rows after base filters: {len(df)}")
             
             # Add the filtered DataFrame to the list
             all_data.append(df)
@@ -99,7 +129,7 @@ def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], cr
 
     # Select relevant columns
     col = ['assignment_date', 'campaign_name', 'priority', 'campaign_details', 'user_id', 'username', 'firstLast_name', 'phone', 'level',
-           'register_currency', 'last_activity']
+            'register_currency', 'last_activity', 'source_table']
     available_users = available_users[col]
 
     # Replace campaign names
@@ -118,8 +148,21 @@ def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], cr
         available_users['campaign_name'].replace(replace)
     )
 
-    # Remove duplicates in available_users based only on user_id
+    # Keep one row per user_id, preserving the highest-priority campaign row.
+    # This prevents assigning the same user in two campaigns on the same day.
+    before_dedup = len(available_users)
+    available_users['_priority_sort_key'] = available_users['priority'].apply(_priority_sort_key)
+    available_users = available_users.sort_values(['user_id', '_priority_sort_key'], kind='stable')
+    discarded_duplicates = available_users[available_users.duplicated(subset=['user_id'], keep='first')].copy()
     available_users = available_users.drop_duplicates(subset=['user_id'], keep='first')
+    available_users = available_users.drop(columns=['_priority_sort_key'])
+    dedup_removed = before_dedup - len(available_users)
+    if dedup_removed > 0:
+        print(f"\nRemoved {dedup_removed} duplicate rows by user_id using priority order")
+        discarded_by_campaign = discarded_duplicates['campaign_name'].value_counts().sort_values(ascending=False)
+        print("\nDiscarded duplicate users by campaign:")
+        for campaign, count in discarded_by_campaign.items():
+            print(f"  - {campaign}: {count} users")
 
     return available_users
 

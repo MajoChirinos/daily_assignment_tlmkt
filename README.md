@@ -10,7 +10,9 @@ The system now considers:
 - **Country-based distribution**: Operators are assigned one or more countries from `LP_TLMKT`
 - **Priority ordering**: Users are assigned from highest to lowest priority (`ULTRA-1`, `ULTRA-2`, `ALTA-1`, ...)
 - **Fallback completion**: Optional fallback countries can fill incomplete quotas when a country runs out of users
+- **Base data-quality filtering**: Excludes users without `phone` or without a usable `firstLast_name` before assignment and control group reservation
 - **Contacted user exclusion**: Excludes users contacted within configurable discard windows — global or per campaign — from `days_ago_to_discard` back to yesterday
+- **Control group reservation**: Optional per-campaign control groups are reserved before treatment assignment using `control_group_percent`
 - **Currency and campaign filtering**: Allows disabling a campaign for a specific country via `campaigns_to_filter_by_currency`
 - **Config-driven behavior**: Assignment and filtering are controlled by Google Sheets
 
@@ -23,6 +25,15 @@ The system now considers:
 - **Looker Studio report**: [Telemarketing assignment dashboard](https://datastudio.google.com/reporting/08c9ba40-b514-4715-98d1-d8b22a7587a0/page/p_q0dsmy25zd/edit)
    - Page 1: daily assignment by operator, ordered by operator and priority so the highest priority users appear first when downloaded
    - Page 2: daily available data by country and priority
+
+## Current Behavior Snapshot
+
+- User extraction reads all configured segment tables and skips missing or empty tables without stopping the full run.
+- Base filters remove blocked currencies (`CAD`, `ARS`, `BRL`), keep levels 1-3, and remove rows with missing `phone`, null `firstLast_name`, or blank `firstLast_name`.
+- The cleaned `available_users` DataFrame is used for both control users and treatment assignment, so users filtered out at extraction cannot enter either group.
+- Per-campaign discard windows are built from `segments_to_consult`; the largest window determines the BigQuery history fetch range.
+- Control users are sampled before operator assignment, marked as `CONTROL`, and treatment users are marked as `TREATMENT`.
+- The current `main.py` call uses `load_data=False`, so the run creates/validates tables and writes local Excel outputs but does not append rows to BigQuery unless this flag is changed.
 
 ## Project Structure
 
@@ -60,7 +71,9 @@ class Config:
     - float: Decimal numbers (percentages)  
     - str: Text strings
     - list(str): Lists of strings separated by commas
-   - bool: Boolean values (`TRUE` / `FALSE`, `1` / `0`, `yes` / `no`)   - dict(str,list(str)): Dictionary of currency → list of campaigns (format: `PEN:camp1,camp2|BOB:camp1`)    """
+      - bool: Boolean values (`TRUE` / `FALSE`, `1` / `0`, `yes` / `no`)
+      - dict(str,list(str)): Dictionary of currency → list of campaigns (format: `PEN:camp1,camp2|BOB:camp1`)
+      """
 ```
 
 **Main parameters:**
@@ -90,10 +103,10 @@ percentages = {
 - **3 countries**: Distribution 50%-30%-20% in the configured order
 
 **Practical example:**
-If an operator should receive 100 users and manages 3 campaigns:
-- Campaign 1: 50 users (50%)
-- Campaign 2: 30 users (30%)  
-- Campaign 3: 20 users (20%)
+If an operator should receive 100 users and manages 3 countries:
+- Country 1: 50 users (50%)
+- Country 2: 30 users (30%)  
+- Country 3: 20 users (20%)
 
 ## Installation and Configuration
 
@@ -127,13 +140,21 @@ Configure these variables in Cloud Run console:
 ### Local Testing (test_main.py)
 The `test_main.py` script allows you to test the Cloud Run-ready `main.py` locally by simulating the Cloud Run environment:
 
-```python
-# test_main.py configures:
-# 1. BigQuery credentials: service-account.json
-# 2. Sheets credentials: SHEET_CREDENTIALS environment variable
-# 3. Mock request object for Cloud Run compatibility
+```bash
+# test_main.py is a local-only runner based on test_main.example.py.
+# It reads local credential filenames from local_credentials_config.json.
+# local_credentials_config.json is ignored by Git; use local_credentials_config.example.json as a template.
 
 python test_main.py
+```
+
+Expected local credential config:
+
+```json
+{
+   "bigquery_credentials_file": "path/to/bigquery-service-account.json",
+   "sheets_credentials_file": "path/to/google-sheets-service-account.json"
+}
 ```
 
 **Purpose**: Test the exact code that will run in Cloud Run without deploying. Useful for:
@@ -174,8 +195,11 @@ gcloud run deploy daily-assignment-tlmkt \
 
 ### Additional Features
 - **`campaign_details` column**: Support for external campaign metadata
+- **`group_flag` column**: Identifies `CONTROL` and `TREATMENT` rows in the daily assignment output
+- **Experiment metadata**: Adds `experiment_id`, `channel`, and deterministic `user_campaign_id`
 - **Table download tracking**: Shows which tables are being downloaded (* table_name)
 - **Empty table detection**: Warns when tables exist but contain no data (⚠️)
+- **Name validation**: Rows without `firstLast_name` are removed before any assignment logic runs
 
 ## Process Flow
 
@@ -187,6 +211,7 @@ gcloud run deploy daily-assignment-tlmkt \
 ### 2. **Data Extraction (Extract)**
 - **Active operators**: List from Google Sheet 'LP_TLMKT'
 - **Available users**: BigQuery segments according to configuration
+- **Base filters**: Remove blocked currencies, unsupported levels, missing phones, and null or blank `firstLast_name`
 - **Assignment history**: Recently contacted users via telemarketing (`tlmkt_DailyAssignment`) and email marketing (`email_mkt_DailyAssignment`)
 - **Campaign configuration**: Dynamic system parameters
 
@@ -195,6 +220,7 @@ gcloud run deploy daily-assignment-tlmkt \
 - **Currency and campaign filtering**: Exclusion of specific campaigns for specific currencies/countries (`campaigns_to_filter_by_currency`)
 - **Campaign normalization**: Conversion between internal codes and Spanish names
 - **DataFrame creation per campaign**: Organization of available users for reporting and metrics
+- **Control group reservation**: Per-campaign control users are sampled from the cleaned pool before treatment assignment
 - **Country-based quota assignment**: Operators receive quotas by country from `LP_TLMKT`
 - **1-by-1 equitable assignment**: Users are assigned one at a time per operator to keep distribution balanced
 - **Priority-first selection**: Highest-priority users are assigned first within each country
@@ -203,7 +229,49 @@ gcloud run deploy daily-assignment-tlmkt \
 ### 4. **Data Loading (Load)**
 - **Local file**: Excel with daily assignments
 - **BigQuery**: Historical assignment table
+- **Group labeling**: Daily output includes `CONTROL` and `TREATMENT` via `group_flag`
+- **Load flag**: BigQuery append is controlled by `load_data`; current code passes `load_data=False`
 - **Final normalization**: Conversion of codes to Spanish names
+
+### BigQuery Tables
+
+#### `tlmkt_DailyAssignment`
+
+Current schema used by the loader:
+
+| field | type |
+|-------|------|
+| assignment_date | DATETIME |
+| operator | STRING |
+| campaign_name | STRING |
+| user_id | INTEGER |
+| username | STRING |
+| firstLast_name | STRING |
+| phone | STRING |
+| level | INTEGER |
+| register_currency | STRING |
+| last_activity | DATETIME |
+| campaign_details | STRING |
+| priority | STRING |
+| op_email | STRING |
+| group_flag | STRING |
+| experiment_id | STRING |
+| channel | STRING |
+| user_campaign_id | STRING |
+
+#### `tlmkt_AssignmentMetrics`
+
+Current schema used by the loader:
+
+| field | type |
+|-------|------|
+| assignment_date | DATETIME |
+| campaign | STRING |
+| available_users | INTEGER |
+| assigned_users | INTEGER |
+| unassigned_users | INTEGER |
+| country | STRING |
+| priority | STRING |
 
 ## Assignment Algorithms
 
@@ -291,6 +359,8 @@ Available users for assignment: 15561
 
 `days_ago_to_discard` in this sheet defines the per-campaign discard window. If left empty, the global value from `parameters_v2` is used as fallback.
 
+`control_group_percent` defines the percentage of each campaign pool reserved as control before treatment assignment. Use `0` or leave it empty when no control group is needed.
+
 ## Maintenance and Administration
 
 ### Update Operators
@@ -322,6 +392,7 @@ Edit Google Sheet 'Daily_Assignment_Configuration':
 ### Common Troubleshooting
 - **Credentials error**: Verify `gcloud auth list`
 - **Missing data**: Review Google Sheets configuration
+- **Users without names**: Confirm source segment tables populate `firstLast_name`; extraction removes null and blank names before assignment
 - **Unbalanced assignments**: Review LP country mapping, fallback countries, and priority distribution
 - **Schema mismatch**: Ensure the BQ tables include `country` and `priority` in `tlmkt_AssignmentMetrics`
 - **Assignment not loading**: Confirm `load_data=True` in `main.py`

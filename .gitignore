@@ -1,5 +1,6 @@
 # Credentials and sensitive configuration
 *.json
+!local_credentials_config.example.json
 .env
 .env.local
 .env.production
@@ -81,6 +82,7 @@ Thumbs.db
 # Local configuration files
 config_local.py
 local_settings.py
+test_main.py
 
 # Backup files
 *.backup

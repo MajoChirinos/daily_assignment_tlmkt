@@ -167,7 +167,8 @@ def CreateAndLoad_BQ(data_dict: Dict[str, pd.DataFrame], bq: bigquery.Client,
                 # Set job configuration
                 job_config = bigquery.LoadJobConfig(
                     schema            = data_schema,
-                    write_disposition = 'WRITE_APPEND'  # Ensure data is appended to the table
+                    write_disposition = 'WRITE_APPEND',  # Ensure data is appended to the table
+                    schema_update_options = [bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION]
                 )
 
                 # Load data to BigQuery

@@ -73,6 +73,7 @@ def run_daily_assignment(request) -> str:
             return f"Error: Failed to read segment tables - {error}"
 
         campaigns_to_assign = segments_tables['table_name'].tolist()
+        source_table_to_campaign_label = dict(zip(segments_tables['table_name'], segments_tables['campaign_label']))
 
         # Build per-campaign discard window: fallback to global days_ago_to_discard
         campaign_discard_map = {}
@@ -108,6 +109,13 @@ def run_daily_assignment(request) -> str:
         lp = lp[lp['Estatus'] == 'Activo']
         lp.rename(columns={'Nombre y Apellido': 'operator',
                         'Usuario DotPanel' : 'user_dotpanel'}, inplace=True)
+
+        if 'Correo Corporativo' in lp.columns:
+            lp.rename(columns={'Correo Corporativo': 'op_email'}, inplace=True)
+            lp['op_email'] = lp['op_email'].astype(str).str.strip()
+            lp.loc[lp['op_email'].isin(['', 'nan', 'None']), 'op_email'] = None
+        else:
+            lp['op_email'] = None
 
         if 'País' in lp.columns:
             lp.rename(columns={'País': 'country'}, inplace=True)
@@ -190,17 +198,40 @@ def run_daily_assignment(request) -> str:
         except Exception as error:
             print(f"Error extracting data from BigQuery: {error}")
             return f"Error: Failed to extract data - {error}"
-        print("Data extracted successfully")
+        print("\nData extracted successfully")
+        if not available_users.empty:
+            available_users['campaign_label'] = (
+                available_users['source_table']
+                .map(source_table_to_campaign_label)
+                .fillna(available_users['campaign_name'])
+            )
+
+        if not available_users.empty and 'source_table' in available_users.columns:
+            print("\nDownloaded users by table and campaign (before config filters):")
+            downloaded_summary = (
+                available_users
+                .groupby(['source_table', 'campaign_name'])
+                .size()
+                .reset_index(name='users')
+                .sort_values(['source_table', 'users'], ascending=[True, False])
+            )
+            for _, row in downloaded_summary.iterrows():
+                print(f"  • {row['source_table']} | {row['campaign_name']}: {row['users']} users")
 
 
 
         if campaigns_to_filter:
             print(f"Filtering campaigns from config: {campaigns_to_filter}")
+            removed_global = available_users[available_users['campaign_name'].isin(campaigns_to_filter)]
+            if not removed_global.empty:
+                removed_global_summary = removed_global['campaign_name'].value_counts()
+                for campaign, count in removed_global_summary.items():
+                    print(f"  - Removed by global campaign filter | {campaign}: {count} users")
             available_users = available_users[~available_users['campaign_name'].isin(campaigns_to_filter)]
             print(f"Users after campaign filter: {available_users.shape[0]}")
 
         if campaigns_to_filter_by_currency:
-            print("Filtering campaigns by currency:")
+            print("\nFiltering campaigns by currency:")
             for currency, campaigns in campaigns_to_filter_by_currency.items():
                 print(f"  - {currency}: {campaigns}")
             for currency, campaigns in campaigns_to_filter_by_currency.items():
@@ -209,12 +240,21 @@ def run_daily_assignment(request) -> str:
                     (available_users['campaign_name'].isin(campaigns))
                 )
                 removed = mask.sum()
+                if removed > 0:
+                    removed_breakdown = (
+                        available_users[mask]
+                        .groupby('campaign_name')
+                        .size()
+                        .sort_values(ascending=False)
+                    )
+                    for campaign, campaign_count in removed_breakdown.items():
+                        print(f"    · Removed {campaign_count} users from campaign '{campaign}' in {currency}")
                 available_users = available_users[~mask]
                 print(f"  [{currency}] Removed {removed} users from campaigns {campaigns}")
-            print(f"Users after currency-campaign filter: {available_users.shape[0]}")
+            print(f"\nUsers after currency-campaign filter: {available_users.shape[0]}")
 
         # Remove users contacted within each campaign's lookback window
-        print(f"Discarding previously contacted users (per-campaign windows, up to {yesterday_str})")
+        print(f"\nDiscarding previously contacted users (per-campaign windows, up to {yesterday_str})")
         available_users = available_users.merge(
             users_to_discard, 
             on=['user_id', 'campaign_name'], 
@@ -222,20 +262,38 @@ def run_daily_assignment(request) -> str:
             indicator=True
         )
 
+        discarded_by_campaign = (
+            available_users[available_users['_merge'] == 'both']
+            .groupby('campaign_name')
+            .size()
+            .sort_values(ascending=False)
+        )
+        if not discarded_by_campaign.empty:
+            print("Users discarded by campaign due to contact history:")
+            for campaign, count in discarded_by_campaign.items():
+                print(f"  • {campaign}: {count} users discarded")
+
         available_users = available_users[available_users['_merge'] == 'left_only'].drop(columns=['_merge'])
 
         before_dedup = available_users.shape[0]
-        available_users = available_users.drop_duplicates(subset=['user_id', 'campaign_name'])
+        available_users['_priority_key'] = available_users['priority'].apply(create_priority_sort_key)
+        available_users['_priority_key'] = available_users['_priority_key'].apply(
+            lambda key: key if key is not None else (99, 99)
+        )
+        available_users = available_users.sort_values(['user_id', '_priority_key'], kind='stable')
+        available_users = available_users.drop_duplicates(subset=['user_id'], keep='first')
+        available_users = available_users.drop(columns=['_priority_key'])
         dedup_removed = before_dedup - available_users.shape[0]
         if dedup_removed > 0:
-            print(f"Duplicate (user_id, campaign_name) rows removed: {dedup_removed}")
+            print(f"Duplicate users removed by priority order: {dedup_removed}")
 
-        print(f"Available users for assignment: {available_users.shape[0]}")
+        print(f"\nAvailable users for assignment: {available_users.shape[0]}")
 
         # ========== CONTROL GROUP RESERVATION ==========
         # Reserve a fixed percentage per campaign BEFORE assignment.
         # Seed is date-based (YYYYMMDD) so re-running on the same day yields identical results.
         control_seed = int(today)
+        control_users = available_users.head(0).copy()
         active_control_campaigns = {k: v for k, v in campaign_control_map.items() if v > 0}
         if active_control_campaigns:
             print(f"\nReserving control groups (random seed={control_seed}):")
@@ -249,16 +307,18 @@ def run_daily_assignment(request) -> str:
                     print(f"  • {campaign_label}: {n_control}/{len(campaign_pool)} users reserved as control ({pct:.0%})")
                 else:
                     print(f"  • {campaign_label}: 0 users reserved (pool too small for {pct:.0%})")
+            if control_indices:
+                control_users = available_users.loc[control_indices].copy()
             available_users = available_users.drop(index=control_indices)
             print(f"Available users after control group reservation: {available_users.shape[0]}")
         else:
             print("\nNo control groups configured — all available users eligible for assignment.")
 
-        # Summary of available users by currency (after discarding contacted users)
-        print("\nAvailable users by currency (after discarding contacted users):")
-        currency_summary = available_users['register_currency'].value_counts()
-        for currency, count in currency_summary.items():
-            print(f"  \u2022 {currency}: {count} users")
+        # Summary of available users by campaign (after discarding contacted users)
+        print("\nAvailable users by campaign (after discarding contacted users):")
+        campaign_summary = available_users['campaign_name'].value_counts()
+        for campaign, count in campaign_summary.items():
+            print(f"  • {campaign}: {count} users")
         
         # Show users by campaign after filtering
         if not available_users.empty:
@@ -281,22 +341,6 @@ def run_daily_assignment(request) -> str:
                 operators = sorted(group['operator'].dropna().astype(str).unique().tolist())
                 print(f"  • {country}: {len(operators)} operators")
                 print(f"    Operators: {', '.join(operators)}")
-
-            # Priority visibility before assignment
-            print("\nAvailable users by campaign and priority:")
-            available_priority = (
-                available_users
-                .groupby(['campaign_name', 'priority'], dropna=False)
-                .size()
-                .reset_index(name='users')
-            )
-            available_priority['_priority_key'] = available_priority['priority'].apply(create_priority_sort_key)
-            available_priority['_priority_key'] = available_priority['_priority_key'].apply(
-                lambda key: key if key is not None else (99, 99)
-            )
-            available_priority = available_priority.sort_values(['_priority_key', 'campaign_name'])
-            for _, row in available_priority.iterrows():
-                print(f"  • {row['campaign_name']} | {row['priority']}: {row['users']}")
         else:
             print("⚠️ No users available for any campaign after filtering!")
 
@@ -368,22 +412,6 @@ def run_daily_assignment(request) -> str:
         print(f"Users assigned: {len(assigned_users)}")
         print(f"Users remaining unassigned: {len(remaining_users)}")
 
-        if not assigned_users.empty:
-            print("\nAssigned users by campaign and priority:")
-            assigned_priority = (
-                assigned_users
-                .groupby(['campaign', 'priority'], dropna=False)
-                .size()
-                .reset_index(name='users')
-            )
-            assigned_priority['_priority_key'] = assigned_priority['priority'].apply(create_priority_sort_key)
-            assigned_priority['_priority_key'] = assigned_priority['_priority_key'].apply(
-                lambda key: key if key is not None else (99, 99)
-            )
-            assigned_priority = assigned_priority.sort_values(['_priority_key', 'campaign'])
-            for _, row in assigned_priority.iterrows():
-                print(f"  • {row['campaign']} | {row['priority']}: {row['users']}")
-
         print("\n" + "="*80)
         print("User assignment process completed successfully.")
         print(f"\nFINAL ASSIGNMENT SUMMARY:")
@@ -437,8 +465,6 @@ def run_daily_assignment(request) -> str:
         assignment_metrics['assignment_date'] = pd.to_datetime(assignment_metrics['assignment_date'], format='%Y%m%d')
         
         print("Assignment metrics created successfully.")
-        print("\nAssignment Metrics:")
-        print(assignment_metrics)
         
         # Save assignment metrics locally
         print("\nSaving assignment metrics to local file...")
@@ -451,35 +477,76 @@ def run_daily_assignment(request) -> str:
         
         # ========== DATA LOADING ==========
         assigned_users = assigned_users.copy()
+        assigned_users['group_flag'] = 'TREATMENT'
+
+        control_users = control_users.copy()
+        if not control_users.empty:
+            control_users['campaign'] = control_users['campaign_name']
+            control_users['operator'] = None
+            control_users['group_flag'] = 'CONTROL'
+
+        daily_assignment_users = pd.concat([assigned_users, control_users], ignore_index=True)
+
+        if not daily_assignment_users.empty:
+            print("\nDaily Assignment group summary by campaign:")
+            group_summary = (
+                daily_assignment_users
+                .groupby(['campaign_name', 'group_flag'])
+                .size()
+                .unstack(fill_value=0)
+            )
+            for campaign, row in group_summary.iterrows():
+                control_count = row.get('CONTROL', 0)
+                treatment_count = row.get('TREATMENT', 0)
+                print(f"  • {campaign}: CONTROL={control_count}, TREATMENT={treatment_count}")
 
         # Convert internal codes to Spanish names for BigQuery
-        assigned_users['campaign_name'] = assigned_users['campaign_name'].apply(normalize_campaign_to_display)
+        daily_assignment_users['campaign_name'] = daily_assignment_users['campaign_name'].apply(normalize_campaign_to_display)
 
         # Ensure campaign_details column exists (NULL for regular campaigns, filled for external campaigns)
-        if 'campaign_details' not in assigned_users.columns:
-            assigned_users['campaign_details'] = None
+        if 'campaign_details' not in daily_assignment_users.columns:
+            daily_assignment_users['campaign_details'] = None
 
         # Apply data type transformations
-        assigned_users['assignment_date'] = pd.to_datetime(assigned_users['assignment_date'])
-        assigned_users['user_id'] = assigned_users['user_id'].astype('Int64')
-        assigned_users['level'] = assigned_users['level'].astype('Int64')
-        assigned_users['phone'] = assigned_users['phone'].astype(str)
-        assigned_users['last_activity'] = pd.to_datetime(assigned_users['last_activity'])
+        daily_assignment_users['assignment_date'] = pd.to_datetime(daily_assignment_users['assignment_date'])
+        daily_assignment_users['user_id'] = daily_assignment_users['user_id'].astype('Int64')
+        daily_assignment_users['level'] = daily_assignment_users['level'].astype('Int64')
+        daily_assignment_users['phone'] = daily_assignment_users['phone'].astype(str)
+        daily_assignment_users['last_activity'] = pd.to_datetime(daily_assignment_users['last_activity'])
+        daily_assignment_users['experiment_id'] = None
+        daily_assignment_users['channel'] = 'TLMKT'
+        daily_assignment_users['user_campaign_id'] = (
+            daily_assignment_users['user_id'].astype(str)
+            + '_'
+            + daily_assignment_users['campaign_label'].astype(str)
+            + '_'
+            + today
+        )
+
+        # Add corporate email from LP, tied to each operator.
+        operator_email_map = (
+            lp[['operator', 'op_email']]
+            .dropna(subset=['operator'])
+            .drop_duplicates(subset=['operator'], keep='first')
+        )
+        daily_assignment_users = daily_assignment_users.merge(operator_email_map, on='operator', how='left')
 
         # Sort for operator consumption: operator first, then highest priority to lowest.
-        assigned_users['_priority_key'] = assigned_users['priority'].apply(create_priority_sort_key)
-        assigned_users['_priority_key'] = assigned_users['_priority_key'].apply(
+        daily_assignment_users['_priority_key'] = daily_assignment_users['priority'].apply(create_priority_sort_key)
+        daily_assignment_users['_priority_key'] = daily_assignment_users['_priority_key'].apply(
             lambda key: key if key is not None else (99, 99)
         )
-        assigned_users = assigned_users.sort_values(
+        daily_assignment_users = daily_assignment_users.sort_values(
             ['operator', '_priority_key', 'campaign_name', 'user_id'],
-            ascending=[True, True, True, True]
+            ascending=[True, True, True, True],
+            na_position='last'
         )
 
         # Reorder columns
         column_order = [
             'assignment_date',
-            'operator', 
+            'operator',
+            'op_email', 
             'campaign_name',
             'campaign_details',
             'priority',
@@ -489,15 +556,19 @@ def run_daily_assignment(request) -> str:
             'phone',
             'level',
             'register_currency',
-            'last_activity'
+            'last_activity',
+            'group_flag',
+            'experiment_id',
+            'channel',
+            'user_campaign_id'
         ]
 
-        assigned_users = assigned_users[column_order]
+        daily_assignment_users = daily_assignment_users[column_order]
 
         # Save assignment locally
-        print("Saving assignment to local file...")
+        print("\nSaving assignment to local file...")
         try:
-            assigned_users.to_excel(f'./data/Telemarketing_Assignment_{today}.xlsx', index=False)
+            daily_assignment_users.to_excel(f'./data/Telemarketing_Assignment_{today}.xlsx', index=False)
             print("Assignment saved to local file.")
         except Exception as error:
             print(f"Error saving to local file: {error}")
@@ -509,9 +580,10 @@ def run_daily_assignment(request) -> str:
 
         # Create Assignment data dictionary
         dict_tlmkt_assignment = {
-            'DailyAssignment': assigned_users[['assignment_date', 'operator', 'campaign_name', 'user_id',
+            'DailyAssignment': daily_assignment_users[['assignment_date', 'operator', 'campaign_name', 'user_id',
             'username', 'firstLast_name', 'phone', 'level', 'register_currency', 'last_activity',
-            'campaign_details', 'priority']],
+            'campaign_details', 'priority', 'op_email', 'group_flag', 'experiment_id', 'channel',
+            'user_campaign_id']],
             'AssignmentMetrics': assignment_metrics[['assignment_date', 'campaign', 'available_users',
             'assigned_users', 'unassigned_users', 'country', 'priority']]
         }
@@ -524,8 +596,8 @@ def run_daily_assignment(request) -> str:
                              dataset_id='dm_telemarketing', 
                              prefix='tlmkt_', 
                              deleted_if_exist=False, 
-                             load_data=True, 
-                             delete_today=True)
+                             load_data=False, 
+                             delete_today=False)
         except Exception as error:
             print(f"Error loading data to BigQuery: {error}")
             return f"Error: Failed to load data to BigQuery - {error}"
@@ -535,6 +607,7 @@ def run_daily_assignment(request) -> str:
     
     except Exception as error:
         print(f"Unexpected error in run_daily_assignment: {error}")
-        return f"Error: Unexpected error - {error}"
+        return f"Error: Unexpected error - {error}"'group_flag',
+
 
 
