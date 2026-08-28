@@ -596,7 +596,7 @@ def run_daily_assignment(request) -> str:
                              dataset_id='dm_telemarketing', 
                              prefix='tlmkt_', 
                              deleted_if_exist=False, 
-                             load_data=False, 
+                             load_data=True, 
                              delete_today=False)
         except Exception as error:
             print(f"Error loading data to BigQuery: {error}")
