@@ -6,7 +6,7 @@ from google.cloud import bigquery
 from google.auth import default
 
 # Local project modules
-from src.extract import read_google_sheet, get_data, get_data_hist
+from src.extract import read_bigquery_table, get_data, get_data_hist
 from src.config import Config
 from src.transform import (
     normalize_country_to_currency,
@@ -24,15 +24,19 @@ from src.load import CreateAndLoad_BQ
 
 def run_daily_assignment(request) -> str:
     try:
-        creds, project = default()
+        creds, project = default(scopes=[
+            'https://www.googleapis.com/auth/cloud-platform',
+            'https://www.googleapis.com/auth/drive.readonly',
+        ])
 
 
         # ========== ASSIGNMENT CONFIGURATION ==========
         # Read configuration file
         try:
-            conf = read_google_sheet('Daily_Assignment_Configuration', 2)
+            conf = read_bigquery_table('conf_parameters_v2', credentials=creds)
+            conf = conf.dropna(subset=['variable', 'value', 'type'], how='all')
         except Exception as error:
-            print(f"Error reading configuration from Google Sheets: {error}")
+            print(f"Error reading configuration from BigQuery: {error}")
             return f"Error: Failed to read configuration - {error}"
 
         # Create configuration object
@@ -67,9 +71,9 @@ def run_daily_assignment(request) -> str:
         # ========== DATA PREPARATION ==========
         # Segment tables to assign (read early to build per-campaign discard windows)
         try:
-            segments_tables = read_google_sheet('Daily_Assignment_Configuration', 1)
+            segments_tables = read_bigquery_table('conf_segments_to_consult', credentials=creds)
         except Exception as error:
-            print(f"Error reading segment tables from Google Sheets: {error}")
+            print(f"Error reading segment tables from BigQuery: {error}")
             return f"Error: Failed to read segment tables - {error}"
 
         campaigns_to_assign = segments_tables['table_name'].tolist()
@@ -100,31 +104,29 @@ def run_daily_assignment(request) -> str:
 
         # LP-TLMKT processing
         try:
-            lp = read_google_sheet('LP_TLMKT', 0)
+            lp = read_bigquery_table('lp_tlmkt_current', credentials=creds)
         except Exception as error:
-            print(f"Error reading LP_TLMKT from Google Sheets: {error}")
-            return f"Error: Failed to read LP_TLMKT - {error}"
+            print(f"Error reading lp_tlmkt_current from BigQuery: {error}")
+            return f"Error: Failed to read lp_tlmkt_current - {error}"
         
-        lp = lp[lp['Cargo'] == 'Ejecutivo de Televentas']
-        lp = lp[lp['Estatus'] == 'Activo']
-        lp.rename(columns={'Nombre y Apellido': 'operator',
-                        'Usuario DotPanel' : 'user_dotpanel'}, inplace=True)
+        lp = lp[(lp['job_title'] == 'Ejecutivo de Televentas') & (lp['status'] == 'Activo')].copy()
+        lp.rename(columns={'full_name': 'operator',
+                        'dotpanel_username': 'user_dotpanel'}, inplace=True)
 
-        if 'Correo Corporativo' in lp.columns:
-            lp.rename(columns={'Correo Corporativo': 'op_email'}, inplace=True)
-            lp['op_email'] = lp['op_email'].astype(str).str.strip()
-            lp.loc[lp['op_email'].isin(['', 'nan', 'None']), 'op_email'] = None
+        if 'corporate_email' in lp.columns:
+            lp.rename(columns={'corporate_email': 'op_email'}, inplace=True)
+            lp['op_email'] = lp['op_email'].astype('string').str.strip()
+            lp['op_email'] = lp['op_email'].where(
+                lp['op_email'].notna() & ~lp['op_email'].isin(['', 'nan', 'None']), None
+            ).astype(object)
+            lp.loc[lp['op_email'].isna(), 'op_email'] = None
         else:
             lp['op_email'] = None
 
-        if 'País' in lp.columns:
-            lp.rename(columns={'País': 'country'}, inplace=True)
-        elif 'Pais' in lp.columns:
-            lp.rename(columns={'Pais': 'country'}, inplace=True)
-        else:
-            return "Error: LP_TLMKT is missing country column (País/Pais)"
+        if 'country' not in lp.columns:
+            return "Error: lp_tlmkt_current is missing country column"
 
-        lp['country'] = lp['country'].astype(str).str.upper().str.split(',\s*')
+        lp['country'] = lp['country'].fillna('').astype(str).str.upper().str.split(r',\s*')
         original_lp_countries = (
             lp[['country']]
             .explode('country')['country']
@@ -379,8 +381,16 @@ def run_daily_assignment(request) -> str:
                 # Fallback: split equally when operator has more than 3 countries
                 country_percentages = [1 / num_countries] * num_countries
 
+            # Round all countries except the last; give the last the exact remainder
+            # so the operator's total always equals users_to_assign_per_operator,
+            # whatever value that parameter has (e.g. 50, 100, etc.).
+            remaining_to_assign = users_to_assign_per_operator
             for idx, country in enumerate(countries):
-                users_to_assign = round(users_to_assign_per_operator * country_percentages[idx])
+                if idx < num_countries - 1:
+                    users_to_assign = round(users_to_assign_per_operator * country_percentages[idx])
+                else:
+                    users_to_assign = remaining_to_assign
+                remaining_to_assign -= users_to_assign
 
                 if country not in assignment_dict:
                     assignment_dict[country] = []

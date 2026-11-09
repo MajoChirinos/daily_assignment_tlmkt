@@ -1,11 +1,7 @@
 import pandas as pd
 import numpy as np
 import pandas_gbq
-from oauth2client.service_account import ServiceAccountCredentials
-import gspread
-import os
 from typing import List
-import json
 
 
 def _priority_sort_key(priority_value):
@@ -33,32 +29,12 @@ def _priority_sort_key(priority_value):
 
     return (99, 99)
 
-def read_google_sheet(sheet, work_sheet):
-    
-
-    json_keyfile_path = os.getenv('SHEET_CREDENTIALS')
-    
-    if json_keyfile_path is None:
-        raise ValueError("SHEET_CREDENTIALS environment variable not set. Please configure it in Cloud Run.")
-    
-    # Define the scope
-    scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
-    # Add credentials to the account
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(json_keyfile_path), scope)
-
-    # Authorize the clientsheet
-    client = gspread.authorize(creds)
-
-    # Get the instance of the Spreadsheet
-    df_sheet = client.open(sheet)
-    # Get the first sheet of the Spreadsheet
-    df_sheet_instance = df_sheet.get_worksheet(work_sheet)
-    # Get all the records of the data
-    df_data = df_sheet_instance.get_all_records()
-    # Convert the json to dataframe
-    df_data = pd.DataFrame.from_dict(df_data)
-
-    return df_data
+def read_bigquery_table(table_name: str, credentials=None) -> pd.DataFrame:
+    """Read a configuration or operator table from the telemarketing dataset."""
+    query = f"SELECT * FROM `mi-casino.dm_telemarketing.{table_name}`;"
+    return pandas_gbq.read_gbq(
+        query, project_id='mi-casino', use_bqstorage_api=True, credentials=credentials
+    )
 
 def get_data(campaigns_to_assign: List[str], currencies_to_filter: List[str], credentials=None) -> pd.DataFrame:
     """

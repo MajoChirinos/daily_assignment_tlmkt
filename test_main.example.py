@@ -8,10 +8,6 @@ with open(LOCAL_CREDENTIALS_CONFIG, 'r') as f:
 
 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = local_config['bigquery_credentials_file']
 
-with open(local_config['sheets_credentials_file'], 'r') as f:
-    sheet_creds = json.load(f)
-os.environ['SHEET_CREDENTIALS'] = json.dumps(sheet_creds)
-
 from main import run_daily_assignment
 
 

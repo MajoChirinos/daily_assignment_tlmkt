@@ -7,21 +7,22 @@ Automated daily user assignment system for telemarketing operators. The current 
 
 The system now considers:
 
-- **Country-based distribution**: Operators are assigned one or more countries from `LP_TLMKT`
+- **Country-based distribution**: Operators are assigned one or more countries from `lp_tlmkt_current`
 - **Priority ordering**: Users are assigned from highest to lowest priority (`ULTRA-1`, `ULTRA-2`, `ALTA-1`, ...)
 - **Fallback completion**: Optional fallback countries can fill incomplete quotas when a country runs out of users
 - **Base data-quality filtering**: Excludes users without `phone` or without a usable `firstLast_name` before assignment and control group reservation
 - **Contacted user exclusion**: Excludes users contacted within configurable discard windows — global or per campaign — from `days_ago_to_discard` back to yesterday
 - **Control group reservation**: Optional per-campaign control groups are reserved before treatment assignment using `control_group_percent`
 - **Currency and campaign filtering**: Allows disabling a campaign for a specific country via `campaigns_to_filter_by_currency`
-- **Config-driven behavior**: Assignment and filtering are controlled by Google Sheets
+- **Config-driven behavior**: Assignment and filtering are controlled by BigQuery tables
 
 ## Operational References
 
-- **Assignment configuration spreadsheet**: [Daily_Assignment_Configuration](https://docs.google.com/spreadsheets/d/1h7FemF3zjIMCjTwo4DPKrNa-5eE-seV5nAW6tNrdPhU/edit?usp=sharing)
-   - Sheet 0 (parameters): assignment by campaign configuration
-   - Sheet 1 (segments_to_consult): segments to consult
-   - Sheet 2 (parameters_v2): assignment by country configuration
+- **Configuration dataset**: `mi-casino.dm_telemarketing`
+   - `conf_parameters_v2`: assignment parameters
+   - `conf_segments_to_consult`: segments to consult
+   - `lp_tlmkt_current`: operator roster
+   - `conf_priority_by_campaign`: not read by the current country-based algorithm; priorities come from segment data
 - **Looker Studio report**: [Telemarketing assignment dashboard](https://datastudio.google.com/reporting/08c9ba40-b514-4715-98d1-d8b22a7587a0/page/p_q0dsmy25zd/edit)
    - Page 1: daily assignment by operator, ordered by operator and priority so the highest priority users appear first when downloaded
    - Page 2: daily available data by country and priority
@@ -31,7 +32,7 @@ The system now considers:
 - User extraction reads all configured segment tables and skips missing or empty tables without stopping the full run.
 - Base filters remove blocked currencies (`CAD`, `ARS`, `BRL`), keep levels 1-3, and remove rows with missing `phone`, null `firstLast_name`, or blank `firstLast_name`.
 - The cleaned `available_users` DataFrame is used for both control users and treatment assignment, so users filtered out at extraction cannot enter either group.
-- Per-campaign discard windows are built from `segments_to_consult`; the largest window determines the BigQuery history fetch range.
+- Per-campaign discard windows are built from `conf_segments_to_consult`; the largest window determines the BigQuery history fetch range.
 - Control users are sampled before operator assignment, marked as `CONTROL`, and treatment users are marked as `TREATMENT`.
 - The current `main.py` call uses `load_data=False`, so the run creates/validates tables and writes local Excel outputs but does not append rows to BigQuery unless this flag is changed.
 
@@ -42,7 +43,7 @@ daily_assignment_tlmkt/
 ├── data/                          # Assignment output files (Excel)
 ├── src/
 │   ├── config.py                  # Dynamic configuration class
-│   ├── extract.py                 # BigQuery and Google Sheets extraction
+│   ├── extract.py                 # BigQuery extraction
 │   ├── transform.py               # Assignment algorithms and normalization
 │   ├── load.py                    # BigQuery data loading
 │   └── __pycache__/              # Python compiled files
@@ -52,14 +53,13 @@ daily_assignment_tlmkt/
 ├── test_main.py                  # Local testing script
 ├── requirements.txt              # Project dependencies
 ├── iam-account-xxxx-xxxx.json    # Service credentials for BigQuery (not in repo)
-├── xxxxxx-xxxxxxxxxxxx.json  # Service credentials for Sheets (not in repo)
 └── README.md                     # Project documentation
 ```
 
 ## System Configuration
 
 ### Config Class
-The `Config` class dynamically manages all system parameters from Google Sheets:
+The `Config` class dynamically manages all system parameters from `mi-casino.dm_telemarketing.conf_parameters_v2`:
 
 ```python
 class Config:
@@ -77,7 +77,7 @@ class Config:
 ```
 
 **Main parameters:**
-- `days_ago_to_discard`: Global discard window in days. Acts as fallback for campaigns without a specific value in `segments_to_consult`. Also determines how far back history is fetched from BigQuery if no campaign has a larger window.
+- `days_ago_to_discard`: Global discard window in days. Acts as fallback for campaigns without a specific value in `conf_segments_to_consult`. Also determines how far back history is fetched from BigQuery if no campaign has a larger window.
 - `exclude_email_mkt_users`: Whether to include email marketing history in the discard window (`TRUE` / `FALSE`)
 - `users_to_assign_per_operator`: Base number of users per operator (e.g., 100)
 - `currencies_to_filter`: List of currencies to exclude in extraction
@@ -131,9 +131,10 @@ gcloud auth application-default login
 export GOOGLE_APPLICATION_CREDENTIALS="path/to/service-account.json"
 ```
 
-### Environment Variables for Cloud Run
-Configure these variables in Cloud Run console:
-- `SHEET_CREDENTIALS`: JSON string of Google Sheets service account credentials
+### Credentials for Cloud Run
+Use the Cloud Run service account through Application Default Credentials. It needs permission to query BigQuery and read the configuration, operator, segment, and history tables.
+
+Some configuration tables are **BigQuery external tables backed by Google Sheets** (for example, `conf_parameters_v2`). BigQuery reads the Sheet using the credentials of the identity running the query, so the Cloud Run service account must have at least Viewer access to each associated Google Sheet (share the sheet with the service account email). Without that access, queries against those tables fail even if the account has dataset permissions. The code requests the `drive.readonly` scope for this purpose.
 
 ## Usage
 
@@ -152,8 +153,7 @@ Expected local credential config:
 
 ```json
 {
-   "bigquery_credentials_file": "path/to/bigquery-service-account.json",
-   "sheets_credentials_file": "path/to/google-sheets-service-account.json"
+   "bigquery_credentials_file": "path/to/bigquery-service-account.json"
 }
 ```
 
@@ -173,8 +173,7 @@ gcloud run deploy daily-assignment-tlmkt \
   --region southamerica-west1 \
   --allow-unauthenticated
 
-# Set environment variable in Cloud Run console:
-# SHEET_CREDENTIALS = {JSON content from Google Sheets service account}
+# Grant the Cloud Run service account access to the BigQuery tables.
 ```
 
 **Entry point**: `run_daily_assignment(request)` function in main.py
@@ -204,12 +203,12 @@ gcloud run deploy daily-assignment-tlmkt \
 ## Process Flow
 
 ### 1. **Configuration and Credentials**
-- Load configuration from Google Sheets using `Config` class
-- Establish CLI credentials for BigQuery and Google Sheets
+- Load configuration from BigQuery using `Config` class
+- Establish Application Default Credentials for BigQuery
 - Define dates and filtering parameters
 
 ### 2. **Data Extraction (Extract)**
-- **Active operators**: List from Google Sheet 'LP_TLMKT'
+- **Active operators**: List from BigQuery table `lp_tlmkt_current`
 - **Available users**: BigQuery segments according to configuration
 - **Base filters**: Remove blocked currencies, unsupported levels, missing phones, and null or blank `firstLast_name`
 - **Assignment history**: Recently contacted users via telemarketing (`tlmkt_DailyAssignment`) and email marketing (`email_mkt_DailyAssignment`)
@@ -221,7 +220,7 @@ gcloud run deploy daily-assignment-tlmkt \
 - **Campaign normalization**: Conversion between internal codes and Spanish names
 - **DataFrame creation per campaign**: Organization of available users for reporting and metrics
 - **Control group reservation**: Per-campaign control users are sampled from the cleaned pool before treatment assignment
-- **Country-based quota assignment**: Operators receive quotas by country from `LP_TLMKT`
+- **Country-based quota assignment**: Operators receive quotas by country from `lp_tlmkt_current`
 - **1-by-1 equitable assignment**: Users are assigned one at a time per operator to keep distribution balanced
 - **Priority-first selection**: Highest-priority users are assigned first within each country
 - **Optional fallback countries**: `extra_users_country` can fill incomplete quotas if configured
@@ -278,7 +277,7 @@ Current schema used by the loader:
 ### Country-Based Assignment
 
 1. **Operator quota split by country**
-   - Each operator receives quotas for the countries listed in `LP_TLMKT`
+   - Each operator receives quotas for the countries listed in `lp_tlmkt_current`
    - The split uses the configured percentages for 1, 2, or 3 countries
 
 2. **Priority-first consumption**
@@ -334,11 +333,15 @@ Available users for assignment: 15561
 
 ## Configuration Files
 
-### Required Google Sheets:
-1. **Daily_Assignment_Configuration** (Sheet 0): System parameters
-2. **Daily_Assignment_Configuration** (Sheet 1): Segment tables
-3. **Daily_Assignment_Configuration** (Sheet 2): Country-based assignment config
-4. **LP_TLMKT**: Active operators list
+### Required BigQuery Sources:
+All tables are in `mi-casino.dm_telemarketing`:
+1. **conf_parameters_v2**: System parameters (`variable`, `value`, `type`)
+2. **conf_segments_to_consult**: Segment tables and per-campaign controls
+3. **lp_tlmkt_current**: Operator roster with English field names
+
+`conf_priority_by_campaign` is not consumed by the current algorithm. Assignment uses the `priority` values supplied by segment tables.
+
+Configuration tables (such as `conf_parameters_v2`) may be external tables backed by Google Sheets. To change their values, edit the source Sheet (check the "External data configuration" section of each table in BigQuery for its URI).
 
 ### Configuration structure:
 | variable | value | type |
@@ -357,22 +360,24 @@ Available users for assignment: 15561
 | tlmkt_Sport_Events | 0 | Eventos Deportivos | sport_events | 7 |
 | tlmkt_Non_Depositors | 0 | No Depositantes | non_depositors | 21 |
 
-`days_ago_to_discard` in this sheet defines the per-campaign discard window. If left empty, the global value from `parameters_v2` is used as fallback.
+`days_ago_to_discard` in `conf_segments_to_consult` defines the per-campaign discard window. If left null or empty, the global value from `conf_parameters_v2` is used as fallback.
 
 `control_group_percent` defines the percentage of each campaign pool reserved as control before treatment assignment. Use `0` or leave it empty when no control group is needed.
 
 ## Maintenance and Administration
 
 ### Update Operators
-Edit Google Sheet 'LP_TLMKT':
-- **Name and Surname**: Full name of operator
-- **DotPanel User**: System username  
-- **Campaign**: Comma-separated list of campaigns
-- **Position**: "Sales Executive"
-- **Status**: "Active" to include in assignments
+Edit BigQuery table `mi-casino.dm_telemarketing.lp_tlmkt_current`:
+- **full_name**: Full name, mapped internally to `operator`
+- **dotpanel_username**: System username, mapped to `user_dotpanel`
+- **corporate_email**: Email, mapped to `op_email`; null or blank means no email
+- **country**: Comma-separated countries, preserving their quota order
+- **job_title**: "Ejecutivo de Televentas"
+- **status**: "Activo" to include in assignments
+- **shift**, **campaign**, **notion_permission_type**: Present in the roster but not used by current assignment logic
 
 ### Modify System Parameters
-Edit Google Sheet 'Daily_Assignment_Configuration':
+Edit BigQuery table `mi-casino.dm_telemarketing.conf_parameters_v2`:
 - Change excluded currencies and campaigns
 - Adjust exclusion days
 - Modify number of users per operator
@@ -380,7 +385,7 @@ Edit Google Sheet 'Daily_Assignment_Configuration':
 - Define fallback countries to fill incomplete quotas
 
 ### Add New Campaigns
-1. Include table in segment configuration sheet
+1. Include table in `conf_segments_to_consult`
 2. Update normalization in `transform.py`:
    ```python
    pattern_map = {
@@ -391,7 +396,7 @@ Edit Google Sheet 'Daily_Assignment_Configuration':
 
 ### Common Troubleshooting
 - **Credentials error**: Verify `gcloud auth list`
-- **Missing data**: Review Google Sheets configuration
+- **Missing data**: Review BigQuery configuration tables and access permissions
 - **Users without names**: Confirm source segment tables populate `firstLast_name`; extraction removes null and blank names before assignment
 - **Unbalanced assignments**: Review LP country mapping, fallback countries, and priority distribution
 - **Schema mismatch**: Ensure the BQ tables include `country` and `priority` in `tlmkt_AssignmentMetrics`
