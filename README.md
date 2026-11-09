@@ -47,10 +47,11 @@ daily_assignment_tlmkt/
 │   ├── transform.py               # Assignment algorithms and normalization
 │   ├── load.py                    # BigQuery data loading
 │   └── __pycache__/              # Python compiled files
-├── .env                          # Environment variables (not in repo)
 ├── .gitignore                    # Version control exclusions
 ├── main.py                       # Main executable (Cloud Run compatible)
 ├── test_main.py                  # Local testing script
+├── test_main.example.py          # Local runner template
+├── local_credentials_config.example.json # Local configuration template
 ├── requirements.txt              # Project dependencies
 ├── iam-account-xxxx-xxxx.json    # Service credentials for BigQuery (not in repo)
 └── README.md                     # Project documentation
@@ -122,15 +123,6 @@ If an operator should receive 100 users and manages 3 countries:
 pip install -r requirements.txt
 ```
 
-### Authentication
-```bash
-# Using CLI credentials (recommended for development)
-gcloud auth application-default login
-
-# Or configure environment variable for production
-export GOOGLE_APPLICATION_CREDENTIALS="path/to/service-account.json"
-```
-
 ### Credentials for Cloud Run
 Use the Cloud Run service account through Application Default Credentials. It needs permission to query BigQuery and read the configuration, operator, segment, and history tables.
 
@@ -139,31 +131,50 @@ Some configuration tables are **BigQuery external tables backed by Google Sheets
 ## Usage
 
 ### Local Testing (test_main.py)
-The `test_main.py` script allows you to test the Cloud Run-ready `main.py` locally by simulating the Cloud Run environment:
+Follow these steps after cloning the repository to run the full workflow on your machine:
 
-```bash
-# test_main.py is a local-only runner based on test_main.example.py.
-# It reads local credential filenames from local_credentials_config.json.
-# local_credentials_config.json is ignored by Git; use local_credentials_config.example.json as a template.
+1. Create and activate a virtual environment:
 
-python test_main.py
-```
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   ```
 
-Expected local credential config:
+   On macOS or Linux, activate it with `source .venv/bin/activate`.
 
-```json
-{
-   "bigquery_credentials_file": "path/to/bigquery-service-account.json"
-}
-```
+2. Install dependencies:
 
-**Purpose**: Test the exact code that will run in Cloud Run without deploying. Useful for:
-- Validating assignment logic before deployment
-- Debugging credential issues locally
-- Testing configuration changes
-- Verifying data extraction and transformation
+   ```shell
+   python -m pip install -r requirements.txt
+   ```
 
-**Output**: Complete execution log with final result status.
+3. Ask the project administrator for a service account JSON key authorized to access the project. The account must be able to run queries and read the required BigQuery tables, and have Viewer access to the Google Sheets backing any external tables. Do not download or share credentials from the repository.
+
+4. Copy the local configuration template:
+
+   ```powershell
+   Copy-Item local_credentials_config.example.json local_credentials_config.json
+   ```
+
+   On macOS or Linux, use `cp local_credentials_config.example.json local_credentials_config.json`.
+
+5. Edit `local_credentials_config.json` and set `bigquery_credentials_file` to the path of the service account JSON key. On Windows, `/` can be used in the path, for example `C:/Users/your_user/credentials/bigquery.json`.
+
+   ```json
+   {
+     "bigquery_credentials_file": "path/to/service-account-key.json"
+   }
+   ```
+
+6. Run the local runner:
+
+   ```shell
+   python test_main.py
+   ```
+
+`test_main.py` uses this configuration to set `GOOGLE_APPLICATION_CREDENTIALS` and run `main.py`. **This is not an isolated test and requires Google Cloud access**: it queries BigQuery and may create the workflow's output files. No `.env` file is needed; the runner does not load one. `local_credentials_config.json` and credential files are excluded from Git.
+
+The runner lets you exercise the local workflow before deployment, including data extraction and transformation.
 
 ### Cloud Run Deployment
 ```bash
@@ -401,4 +412,3 @@ Edit BigQuery table `mi-casino.dm_telemarketing.conf_parameters_v2`:
 - **Unbalanced assignments**: Review LP country mapping, fallback countries, and priority distribution
 - **Schema mismatch**: Ensure the BQ tables include `country` and `priority` in `tlmkt_AssignmentMetrics`
 - **Assignment not loading**: Confirm `load_data=True` in `main.py`
-

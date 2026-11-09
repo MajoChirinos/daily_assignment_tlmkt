@@ -47,10 +47,11 @@ daily_assignment_tlmkt/
 │   ├── transform.py               # Algoritmos de asignación y normalización
 │   ├── load.py                    # Carga de datos a BigQuery
 │   └── __pycache__/              # Archivos compilados de Python
-├── .env                          # Variables de entorno (no en repo)
 ├── .gitignore                    # Exclusiones de control de versiones
 ├── main.py                       # Ejecutable principal (compatible con Cloud Run)
 ├── test_main.py                  # Script de pruebas locales
+├── test_main.example.py          # Plantilla del runner local
+├── local_credentials_config.example.json # Plantilla de configuración local
 ├── requirements.txt              # Dependencias del proyecto
 ├── xxx-xxxxxx-xxxx-xxxx.json # Credenciales de servicio para BigQuery (no en repo)
 ├── README.md                     # Documentación del proyecto (inglés)
@@ -123,15 +124,6 @@ Si un operador debe recibir 100 usuarios y maneja 3 países:
 pip install -r requirements.txt
 ```
 
-### Autenticación
-```bash
-# Usar credenciales CLI (recomendado para desarrollo)
-gcloud auth application-default login
-
-# O configurar variable de entorno para producción
-export GOOGLE_APPLICATION_CREDENTIALS="ruta/a/service-account.json"
-```
-
 ### Credenciales para Cloud Run
 Usar la cuenta de servicio de Cloud Run mediante Application Default Credentials. Debe poder ejecutar consultas de BigQuery y leer las tablas de configuración, operadores, segmentos e historial.
 
@@ -140,31 +132,50 @@ Algunas tablas de configuración son **tablas externas de BigQuery respaldadas p
 ## Uso
 
 ### Pruebas Locales (test_main.py)
-El script `test_main.py` te permite probar el código de `main.py` listo para Cloud Run localmente, simulando el entorno de Cloud Run:
+Sigue estos pasos después de clonar el repositorio para ejecutar el flujo completo en tu máquina:
 
-```bash
-# test_main.py es un runner local basado en test_main.example.py.
-# Lee los nombres de credenciales locales desde local_credentials_config.json.
-# local_credentials_config.json está ignorado por Git; usar local_credentials_config.example.json como plantilla.
+1. Crea y activa un entorno virtual:
 
-python test_main.py
-```
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   ```
 
-Configuración local esperada:
+   En macOS o Linux, activa el entorno con `source .venv/bin/activate`.
 
-```json
-{
-  "bigquery_credentials_file": "ruta/a/bigquery-service-account.json"
-}
-```
+2. Instala las dependencias:
 
-**Propósito**: Probar el código exacto que se ejecutará en Cloud Run sin desplegarlo. Útil para:
-- Validar la lógica de asignación antes del despliegue
-- Depurar problemas de credenciales localmente
-- Probar cambios de configuración
-- Verificar extracción y transformación de datos
+   ```shell
+   python -m pip install -r requirements.txt
+   ```
 
-**Salida**: Log completo de ejecución con el estado del resultado final.
+3. Solicita al administrador del proyecto un archivo JSON de credenciales de una cuenta de servicio autorizada. La cuenta debe poder ejecutar consultas y leer las tablas necesarias en BigQuery, y tener acceso de lector a los Google Sheets que respaldan tablas externas. No descargues ni compartas credenciales desde el repositorio.
+
+4. Copia la plantilla de configuración local:
+
+   ```powershell
+   Copy-Item local_credentials_config.example.json local_credentials_config.json
+   ```
+
+   En macOS o Linux, usa `cp local_credentials_config.example.json local_credentials_config.json`.
+
+5. Edita `local_credentials_config.json` y reemplaza el valor de `bigquery_credentials_file` por la ruta al archivo JSON de credenciales. En Windows puedes usar `/` en la ruta, por ejemplo `C:/Users/tu_usuario/credenciales/bigquery.json`.
+
+   ```json
+   {
+     "bigquery_credentials_file": "ruta/al/archivo-de-credenciales.json"
+   }
+   ```
+
+6. Ejecuta el runner:
+
+   ```shell
+   python test_main.py
+   ```
+
+`test_main.py` usa esa configuración para establecer `GOOGLE_APPLICATION_CREDENTIALS` y ejecutar `main.py`. **No es una prueba aislada ni funciona sin acceso a Google Cloud**: consulta BigQuery y puede producir los archivos de salida del proceso. No se necesita un archivo `.env`; el runner no lo carga. Los archivos `local_credentials_config.json` y de credenciales están excluidos de Git.
+
+Este runner permite probar el flujo localmente antes de desplegarlo, incluyendo la extracción y transformación de datos.
 
 ### Despliegue en Cloud Run
 ```bash
