@@ -7,14 +7,14 @@ Sistema automatizado de asignación diaria de usuarios para operadores de telema
 
 El sistema considera:
 
-- **Distribución por país**: Cada operador recibe uno o más países desde `lp_tlmkt_current`.
+- **Distribución por país**: Cada operador recibe uno o más países desde `lp_tlmkt_current`
 - **Orden por prioridad**: Los usuarios se asignan de mayor a menor prioridad (`ULTRA-1`, `ULTRA-2`, `ALTA-1`, ...)
 - **Completar con fallback**: Países de respaldo opcionales pueden completar cuotas incompletas cuando un país se queda sin usuarios
 - **Filtrado base de calidad**: Excluye usuarios sin `phone` o sin un `firstLast_name` usable antes de asignar y antes de reservar grupo control
 - **Exclusión de usuarios contactados**: Excluye usuarios contactados según ventanas de descarte configurables — globales o por campaña — desde `days_ago_to_discard` hasta ayer
 - **Reserva de grupo control**: Permite reservar grupos control por campaña antes de la asignación de tratamiento usando `control_group_percent`
 - **Filtrado por moneda y campaña**: Permite apagar una campaña en un país específico mediante `campaigns_to_filter_by_currency`
-- **Comportamiento controlado por configuración**: La asignación y el filtrado se controlan desde tablas de BigQuery.
+- **Comportamiento controlado por configuración**: La asignación y el filtrado se controlan desde tablas de BigQuery
 
 ## Referencias Operativas
 
